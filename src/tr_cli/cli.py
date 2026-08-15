@@ -21,6 +21,7 @@ import json
 import re
 import sys
 import time
+from datetime import datetime
 from getpass import getpass
 from pathlib import Path
 from typing import Any
@@ -367,6 +368,54 @@ def timeline(
         print(json.dumps(data, indent=2))
     else:
         print(render_mod.render_timeline(result, days=days, bucket=bucket))
+
+
+@app.command()
+def history(
+    days: int = typer.Option(
+        90,
+        "--days",
+        help="Fallback window when no account start is detectable (default 90, max 730).",
+    ),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Explicit start date YYYY-MM-DD (overrides auto-detection).",
+    ),
+) -> None:
+    """Backfill a daily portfolio value curve from current holdings.
+
+    Start is auto-detected from the timeline (account creation events /
+    earliest deposit), overridable with --since. --days is the fallback
+    window when no start signal is found.
+    """
+    mock = _ctx_mock()
+    base_dir = _ctx_base_dir()
+    if days < 1 or days > 730:
+        _fail(_usage("--days must be between 1 and 730."))
+    if since is not None:
+        try:
+            datetime.fromisoformat(since)
+        except ValueError:
+            _fail(_usage(f"Invalid --since {since!r}; expected YYYY-MM-DD."))
+    try:
+        transport = _session_transport(mock, base_dir)
+        result = client_mod.history(transport, days=days, since=since)
+    except TrCliError as e:
+        _fail(e)
+    data = {
+        "ok": True,
+        "start_date": result.start_date,
+        "end_date": result.end_date,
+        "days": len(result.series),
+        "approximate": True,
+        "note": result.note,
+        "series": [
+            {"date": p.date, "total": str(p.total), "cash": p.cash}
+            for p in result.series
+        ],
+    }
+    _emit(data, _ctx_json(), render_mod.render_history(result, days=days))
 
 
 @app.command()

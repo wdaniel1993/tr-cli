@@ -229,3 +229,26 @@ def render_timeline(result, *, days: int = 90, bucket: str | None = None) -> str
     if not any_sums:
         lines.append("  (no events in window)")
     return "\n".join(lines)
+
+
+def render_history(result, *, days: int = 365) -> str:
+    """Compact table for the history command."""
+    lines: list[str] = []
+    lines.append(
+        f"HISTORY (last {days} days — approximate: current quantities retroactive, cash constant)"
+    )
+    if not result.series:
+        lines.append("(no series — no positions or no price data)")
+        return "\n".join(lines)
+    lines.append(f"{'date':<12} {'total':>12} {'Δ':>12}")
+    prev: float | None = None
+    for point in result.series:
+        total = float(point.total)
+        delta = ""
+        if prev is not None:
+            delta = f"{total - prev:+,.2f}"
+        lines.append(f"{point.date:<12} {total:>12,.2f} {delta:>12}")
+        prev = total
+    lines.append("")
+    lines.append(f"positions covered: {result.positions_covered} | note: {result.note}")
+    return "\n".join(lines)

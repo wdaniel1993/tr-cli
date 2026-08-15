@@ -325,6 +325,50 @@ def _ytd_base_price(isin: str) -> float:
     return 100.0
 
 
+def _history_bars(
+    base_price: float, last_price: float, num_bars: int, skip_days: int = 0
+) -> dict:
+    """Daily bars ending today, linear from base_price to last_price.
+
+    `skip_days` > 0 removes that many bars from the START of the series
+    (simulates an instrument whose series begins later — missing-bar case).
+    """
+    from datetime import datetime, timedelta
+
+    today = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+    n = num_bars - skip_days
+    step = (last_price - base_price) / max(n - 1, 1)
+    aggregates = []
+    start = today - timedelta(days=num_bars - 1)
+    for i in range(num_bars):
+        day = start + timedelta(days=i)
+        if i < skip_days:
+            continue
+        open_p = base_price + step * i
+        # close = next day's open; the LAST close is exactly last_price (realistic).
+        if i == num_bars - 1:
+            close_p = last_price
+        else:
+            close_p = base_price + step * (i + 1)
+        aggregates.append(
+            {
+                "time": int(day.timestamp() * 1000),
+                "open": round(open_p, 4),
+                "close": round(close_p, 4),
+                "high": round(max(open_p, close_p) * 1.001, 4),
+                "low": round(min(open_p, close_p) * 0.999, 4),
+                "volume": 100,
+            }
+        )
+    return {
+        "aggregates": aggregates,
+        "resolution": 86400000,
+        "unit": "EUR",
+        "sourceCurrency": "EUR",
+        "expectedClosingTime": int(today.timestamp() * 1000),
+    }
+
+
 LOGIN_429_BODY = (
     '{"errors":[{"errorCode":"TOO_MANY_REQUESTS",'
     '"meta":{"nextAttemptInSeconds":600,"nextAttemptTimestamp":"2030-01-01T00:00:00.000Z"}}]}'
@@ -341,6 +385,16 @@ class MockTransport(Transport):
         self._poll_count = 0
         self._session_rotations = 0
         self._requests: list[tuple[str, str]] = []  # (method, path) log for tests
+        # history fixtures
+        self.history_days: int = 200
+        self.missing_history_start: dict[
+            str, int
+        ] = {}  # isin -> days skipped at series start
+        self.fail_history_isins: set[str] = set()  # isin -> series subscription fails
+        # timeline fixtures
+        self.timeline_hide_creation: bool = (
+            os.environ.get("TR_CLI_MOCK_HIDE_CREATION", "0") == "1"
+        )  # drop creation/deposit signals for fallback tests
 
     # --- HTTP ---------------------------------------------------------------
     def request(
@@ -480,6 +534,24 @@ class MockTransport(Transport):
                 items = _timeline_log_items()
             else:
                 items = []
+            if self.timeline_hide_creation:
+                if topic == "timelineActivityLog":
+                    items = [
+                        it
+                        for it in items
+                        if it.get("eventType")
+                        not in (
+                            "CUSTOMER_CREATED",
+                            "SECURITIES_ACCOUNT_CREATED",
+                            "VERIFICATION_TRANSFER_ACCEPTED",
+                        )
+                    ]
+                elif topic == "timelineTransactions":
+                    items = [
+                        it
+                        for it in items
+                        if it.get("eventType") != "BANK_TRANSACTION_INCOMING"
+                    ]
             pages[key] = [
                 items[i : i + TIMELINE_PAGE_SIZE]
                 for i in range(0, len(items), TIMELINE_PAGE_SIZE)
@@ -516,6 +588,63 @@ class MockTransport(Transport):
                     if nxt is not None:
                         next_active.append((key, nxt))
             active = next_active
+        return results
+
+    def ws_rounds(
+        self,
+        batches: Any,
+        *,
+        timeout: float = 8.0,
+        max_rounds: int = 12,
+    ) -> dict[int, dict[Hashable, Any]]:
+        """Emulate sequential rounds; supports builder callables."""
+        results: dict[int, dict[Hashable, Any]] = {}
+        for r_index in range(max_rounds):
+            if callable(batches):
+                batch = batches(r_index, results)
+                if batch is None:
+                    break
+            else:
+                if r_index >= len(batches):
+                    break
+                batch = batches[r_index]
+            collected: dict[Hashable, Any] = {}
+            for key, payload in batch:
+                topic = payload.get("type")
+                if topic == "compactPortfolioByType":
+                    collected[key] = (
+                        {"categories": []}
+                        if self.mode == "empty_portfolio"
+                        else dict(FIXTURE_PORTFOLIO)
+                    )
+                elif topic == "cash":
+                    collected[key] = [dict(c) for c in FIXTURE_CASH]
+                elif topic == "instrument":
+                    isin = payload.get("id", "")
+                    if isin in FIXTURE_INSTRUMENTS:
+                        collected[key] = dict(FIXTURE_INSTRUMENTS[isin])
+                elif topic == "tradeAggregateHistory":
+                    isin = payload.get("isin", "")
+                    last_price = None
+                    for tkey, tval in FIXTURE_TICKERS.items():
+                        if tkey.split(".")[0] == isin:
+                            last_price = float(tval["last"]["price"])
+                            break
+                    if last_price is not None and isin not in self.fail_history_isins:
+                        skip = self.missing_history_start.get(isin, 0)
+                        frm = payload.get("from")
+                        until = payload.get("until")
+                        if frm and until:
+                            num_bars = max(1, int((until - frm) // 86400000))
+                        else:
+                            num_bars = self.history_days
+                        collected[key] = _history_bars(
+                            _ytd_base_price(isin),
+                            last_price,
+                            num_bars=num_bars,
+                            skip_days=skip,
+                        )
+            results[r_index] = collected
         return results
 
     def cookies_snapshot(self) -> dict[str, str]:

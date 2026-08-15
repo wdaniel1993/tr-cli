@@ -77,6 +77,109 @@ def paginate(
     )
 
 
+def rounds(
+    batches: Any,
+    *,
+    cookie_str: str,
+    timeout: float = 8.0,
+    max_rounds: int = 12,
+) -> dict[int, dict[Hashable, Any]]:
+    """Sequential subscribe rounds over ONE WS connection.
+
+    `batches` is either:
+      - a static list of rounds: rounds_list[r] = list of (key, payload) pairs;
+      - a builder callable: builder(round_index, results_so_far) -> list of
+        (key, payload) for the next round, or None to stop. This lets later
+        rounds depend on earlier replies (e.g. instrument ids from the
+        portfolio round) while keeping a single connection.
+
+    Each round subscribes its batch, collects one reply per subscription
+    (keys without a reply are absent), unsubscribes, then moves on.
+    Returns {round_index: {key: payload}}.
+    """
+    return asyncio.run(
+        _rounds_async(
+            batches, cookie_str=cookie_str, timeout=timeout, max_rounds=max_rounds
+        )
+    )
+
+
+async def _rounds_async(
+    batches: Any,
+    *,
+    cookie_str: str,
+    timeout: float,
+    max_rounds: int,
+) -> dict[int, dict[Hashable, Any]]:
+    headers = {"User-Agent": USER_AGENT}
+    if cookie_str:
+        headers["Cookie"] = cookie_str
+    try:
+        ws = await websockets.connect(
+            WS_URL, additional_headers=headers, open_timeout=15
+        )
+    except Exception as e:
+        raise ProtocolError(f"WebSocket connect failed: {type(e).__name__}: {e}") from e
+
+    try:
+        await ws.send(ws_connect_message())
+        greeting = await asyncio.wait_for(ws.recv(), timeout=10)
+        if greeting != "connected":
+            raise ProtocolError(f"Unexpected connect reply: {greeting[:120]!r}")
+
+        previous: dict[str, str] = {}
+        results: dict[int, dict[Hashable, Any]] = {}
+        static_mode = not callable(batches)
+        rounds_list = batches if static_mode else None
+        for r_index in range(max_rounds):
+            if callable(batches):
+                batch = batches(r_index, results)
+                if batch is None:
+                    break
+            else:
+                if r_index >= len(rounds_list):
+                    break
+                batch = rounds_list[r_index]
+            if not batch:
+                results[r_index] = {}
+                continue
+            pending: dict[str, Hashable] = {}
+            for key, payload in batch:
+                sub_id = _next_subscription_id()
+                pending[sub_id] = key
+                await ws.send(
+                    f"sub {sub_id} {json.dumps(payload, separators=(',', ':'))}"
+                )
+            collected: dict[Hashable, Any] = {}
+            deadline = asyncio.get_running_loop().time() + timeout
+            while pending:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    frame = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                except TimeoutError:
+                    break
+                sub_id, code, payload = decode_response(frame, previous)
+                key = pending.get(sub_id)
+                if key is None and code != "C":
+                    continue
+                if code in ("A", "D"):
+                    if key is not None:
+                        collected[key] = payload
+                    await ws.send(f"unsub {sub_id}")
+                    pending.pop(sub_id, None)
+                elif code in ("E", "C"):
+                    pending.pop(sub_id, None)
+            results[r_index] = collected
+    finally:
+        try:
+            await ws.close()
+        except (OSError, asyncio.CancelledError):
+            pass
+    return results
+
+
 async def _paginate_async(
     subscriptions: list[tuple[Hashable, dict[str, Any]]],
     *,

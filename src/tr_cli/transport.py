@@ -89,6 +89,21 @@ class Transport(ABC):
         None to stop. Returns {key: [round_1, round_2, ...]}.
         """
 
+    @abstractmethod
+    def ws_rounds(
+        self,
+        batches: Any,
+        *,
+        timeout: float = 8.0,
+        max_rounds: int = 12,
+    ) -> dict[int, dict[Hashable, Any]]:
+        """Sequential subscribe rounds over ONE WS connection.
+
+        `batches` is a static list of rounds OR a builder
+        `builder(round_index, results_so_far) -> list[(key, payload)] | None`.
+        Returns {round_index: {key: payload}}.
+        """
+
     def cookies_snapshot(self) -> dict[str, str]:
         """Current cookie set (used after login to persist the session)."""
         return {}
@@ -181,6 +196,20 @@ class RealTransport(Transport):
             next_payload=next_payload,
             timeout=timeout,
             max_rounds=max_rounds,
+        )
+
+    def ws_rounds(
+        self,
+        batches: Any,
+        *,
+        timeout: float = 8.0,
+        max_rounds: int = 12,
+    ) -> dict[int, dict[Hashable, Any]]:
+        if not batches:
+            return {}
+        cookie_str = "; ".join(f"{k}={v}" for k, v in self.cookies_snapshot().items())
+        return ws_mod.rounds(
+            batches, cookie_str=cookie_str, timeout=timeout, max_rounds=max_rounds
         )
 
 

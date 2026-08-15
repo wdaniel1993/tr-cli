@@ -1,4 +1,3 @@
-
 from tr_cli import timeline
 from tr_cli.mock import MockTransport
 

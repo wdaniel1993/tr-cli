@@ -14,8 +14,9 @@ collect batches (see ws.collect). Wire topics used:
 from __future__ import annotations
 
 import re
+from collections.abc import Hashable
 from dataclasses import dataclass, field
-from datetime import UTC
+from datetime import UTC, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -26,6 +27,10 @@ from .protocol import (
     year_start_millis,
 )
 from .transport import Transport
+
+HISTORY_DEFAULT_DAYS = 90  # fallback when no account-start signal is detectable
+HISTORY_MAX_DAYS = 730
+HISTORY_NOTE = "current quantities applied retroactively; cash constant"
 
 BOND_PATTERN = re.compile(
     r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|"
@@ -131,9 +136,7 @@ class Portfolio:
         gains = [p.ytd_gain for p in self.positions if p.ytd_gain is not None]
         if not gains:
             return None
-        return sum(gains, Decimal(0)).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
+        return sum(gains, Decimal(0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
     @property
     def total_value(self) -> Decimal:
@@ -406,3 +409,266 @@ def details(transport: Transport, isin: str, *, timeout: float = 6.0) -> dict[st
         ("neonNews", {"type": "neonNews", "isin": isin}),
     ]
     return dict(transport.ws_collect(subs, timeout=timeout))
+
+
+@dataclass
+class HistoryPoint:
+    """One day of the backfilled curve. `total` includes the constant cash."""
+
+    date: str  # YYYY-MM-DD (UTC)
+    total: Decimal
+    cash: str | None
+
+
+@dataclass
+class HistoryResult:
+    series: list[HistoryPoint]
+    start_date: str | None
+    end_date: str | None
+    cash: str | None
+    note: str
+    positions_covered: int
+    positions_without_series: list[str] = field(default_factory=list)
+
+
+def history(
+    transport: Transport,
+    *,
+    since: str | None = None,
+    days: int = HISTORY_DEFAULT_DAYS,
+    timeout: float = 8.0,
+) -> HistoryResult:
+    """Backfill a daily portfolio value curve from current holdings.
+
+    Start-date resolution (in priority order):
+      1. `since` (explicit YYYY-MM-DD override);
+      2. auto-detected account start from the timeline (CUSTOMER_CREATED /
+         SECURITIES_ACCOUNT_CREATED / VERIFICATION_TRANSFER_ACCEPTED / earliest
+         deposit);
+      3. fallback: now − `days` (default 90) when no signal is found.
+
+    ONE WS connection, three sequential rounds (portfolio+cash → instruments →
+    daily bars). Per date: total = Σ (qty × close) over positions that HAVE a
+    bar that day, plus the CURRENT cash (constant — documented approximation).
+    Positions whose series fetch fails are excluded from the whole curve.
+    """
+    if days < 1 or days > HISTORY_MAX_DAYS:
+        from .errors import UsageError
+
+        raise UsageError(f"--days must be between 1 and {HISTORY_MAX_DAYS}.")
+
+    from datetime import date as _date
+    from datetime import datetime
+
+    start_label: str
+    start_date: _date
+    if since is not None:
+        try:
+            start_date = _date.fromisoformat(since)
+        except ValueError:
+            from .errors import UsageError
+
+            raise UsageError(f"Invalid --since {since!r}; expected YYYY-MM-DD.")
+        start_label = f"explicit --since {since}"
+    else:
+        from . import timeline as timeline_mod
+
+        detected = timeline_mod.detect_account_start(transport, timeout=timeout)
+        if detected is not None:
+            dstr, source = detected
+            start_date = _date.fromisoformat(dstr)
+            if source == "CUSTOMER_CREATED":
+                start_label = f"account created {dstr}"
+            elif source == "SECURITIES_ACCOUNT_CREATED":
+                start_label = f"securities account created {dstr}"
+            elif source == "VERIFICATION_TRANSFER_ACCEPTED":
+                start_label = f"first verification transfer {dstr}"
+            else:
+                start_label = f"earliest deposit {dstr}"
+        else:
+            from datetime import datetime as _dt
+            from datetime import timedelta as _td
+
+            start_date = (_dt.now(UTC) - _td(days=days)).date()
+            start_label = f"no creation events found; last {days} days"
+
+    start_ms = int(
+        datetime(
+            start_date.year, start_date.month, start_date.day, tzinfo=UTC
+        ).timestamp()
+        * 1000
+    )
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    from_millis = start_ms
+    acct = account(transport)
+    sec_acc_no = acct.securities_account_number
+    if not sec_acc_no:
+        raise ProtocolError("Account response did not include securitiesAccountNumber.")
+
+    # ONE connection: round 0 = portfolio+cash, round 1 = instruments,
+    # round 2 = daily series (built from the earlier rounds' replies).
+    def build_round(
+        r_index: int, so_far: dict[int, dict[Hashable, Any]]
+    ) -> list[tuple[Hashable, dict[str, Any]]] | None:
+        if r_index == 0:
+            return [
+                (
+                    "portfolio",
+                    {"type": "compactPortfolioByType", "secAccNo": sec_acc_no},
+                ),
+                ("cash", {"type": "cash"}),
+            ]
+        if r_index == 1:
+            pf = so_far.get(0, {}).get("portfolio", {})
+            raw = _normalize_positions(pf) if isinstance(pf, dict) else []
+            return [
+                (idx, {"type": "instrument", "id": pos["instrumentId"]})
+                for idx, pos in enumerate(raw)
+            ]
+        if r_index == 2:
+            raw = _normalize_positions(so_far.get(0, {}).get("portfolio", {}))
+            instruments = so_far.get(1, {})
+            batch = []
+            for idx, pos in enumerate(raw):
+                ex = (instruments.get(idx) or {}).get("exchangeIds") or []
+                ex = ex[0] if ex else None
+                if not ex:
+                    continue
+                batch.append(
+                    (
+                        idx,
+                        {
+                            "type": TRADE_AGGREGATE_HISTORY_TOPIC,
+                            "isin": pos["instrumentId"],
+                            "exchangeId": ex,
+                            "resolution": RESOLUTION_1D_MS,
+                            "from": from_millis,
+                            "until": now_ms,
+                        },
+                    )
+                )
+            return batch
+        return None
+
+    rounds_out = transport.ws_rounds(build_round, timeout=timeout)
+
+    portfolio_payload = rounds_out.get(0, {}).get("portfolio", {})
+    raw_positions = (
+        _normalize_positions(portfolio_payload)
+        if isinstance(portfolio_payload, dict)
+        else []
+    )
+    cash = _parse_cash(rounds_out.get(0, {}).get("cash"))
+    cash_total = str(cash.total) if cash.items else None
+
+    positions: list[dict[str, Any]] = [
+        {"instrumentId": pos["instrumentId"], "netSize": str(pos.get("netSize") or "0")}
+        for pos in raw_positions
+    ]
+    if not positions:
+        return HistoryResult(
+            series=[],
+            start_date=None,
+            end_date=None,
+            cash=cash_total,
+            note=HISTORY_NOTE,
+            positions_covered=0,
+        )
+
+    instruments = rounds_out.get(1, {})
+    for idx, resp in instruments.items():
+        if isinstance(resp, dict):
+            positions[idx]["name"] = resp.get("shortName") or resp.get("name")
+            ex = resp.get("exchangeIds") or []
+            positions[idx]["exchangeIds"] = ex
+
+    covered: set[str] = set()
+    bars_by_position: dict[int, dict[str, Decimal]] = {}
+    series_map = rounds_out.get(2, {})
+    for idx, resp in series_map.items():
+        if not isinstance(resp, dict):
+            continue
+        aggregates = resp.get("aggregates") or []
+        dates: dict[str, Decimal] = {}
+        for bar in aggregates:
+            if (
+                not isinstance(bar, dict)
+                or bar.get("time") is None
+                or bar.get("close") is None
+            ):
+                continue
+            try:
+                day = (
+                    datetime.fromtimestamp(int(bar["time"]) / 1000, tz=UTC)
+                    .date()
+                    .isoformat()
+                )
+                dates[day] = Decimal(str(bar["close"]))
+            except (ValueError, TypeError, ArithmeticError):
+                continue
+        if dates:
+            bars_by_position[idx] = dates
+            covered.add(positions[idx]["instrumentId"])
+
+    missing = [
+        it["instrumentId"] for it in positions if it["instrumentId"] not in covered
+    ]
+    if not bars_by_position:
+        return HistoryResult(
+            series=[],
+            start_date=None,
+            end_date=None,
+            cash=cash_total,
+            note=HISTORY_NOTE,
+            positions_covered=0,
+            positions_without_series=missing,
+        )
+
+    # Union of all bar dates (trading days across positions).
+    all_dates = sorted({d for dates in bars_by_position.values() for d in dates})
+
+    cash_dec = cash.total if cash.items else Decimal(0)
+    series: list[HistoryPoint] = []
+    for day in all_dates:
+        day_total = Decimal(0)
+        for idx, dates in bars_by_position.items():
+            close = dates.get(day)
+            if close is None:
+                continue  # missing bar -> position excluded that day
+            day_total += close * Decimal(positions[idx]["netSize"])
+        day_total = (day_total + cash_dec).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        series.append(HistoryPoint(date=day, total=day_total, cash=cash_total))
+
+    note = f"{HISTORY_NOTE}; start: {start_label}"
+    if missing:
+        note += f"; positions without series: {', '.join(missing)}"
+    if series:
+        # Server returns at most ~200 daily bars; detect truncation vs the
+        # requested start (allow a few days for the first trading day).
+        try:
+            first_bar = datetime.fromisoformat(series[0].date).date()
+            if first_bar > start_date + timedelta(days=3):
+                note += f"; series truncated server-side (oldest bar {series[0].date})"
+        except (ValueError, TypeError):
+            pass
+        # Coverage on the last day: positions without a bar that day are
+        # excluded (thin trading / different market calendars).
+        last_day = series[-1].date
+        covered_last = sum(
+            1 for dates in bars_by_position.values() if last_day in dates
+        )
+        if covered_last < len(bars_by_position):
+            note += (
+                f"; last point covers {covered_last}/{len(bars_by_position)} positions"
+            )
+    return HistoryResult(
+        series=series,
+        start_date=series[0].date if series else None,
+        end_date=series[-1].date if series else None,
+        cash=cash_total,
+        note=note,
+        positions_covered=len(covered),
+        positions_without_series=missing,
+    )

@@ -175,13 +175,17 @@ def _next_page_payload(
 def fetch_timeline(
     transport: Transport,
     *,
-    days: int = TIMELINE_DEFAULT_DAYS,
+    days: int | None = TIMELINE_DEFAULT_DAYS,
     timeout: float = 8.0,
     max_rounds: int = 25,
 ) -> TimelineResult:
-    """Fetch both timeline topics, paginate to the cutoff, merge + classify."""
+    """Fetch both timeline topics, paginate to the cutoff, merge + classify.
+
+    `days=None` disables the age cutoff (pagination continues until the
+    cursors are exhausted) — used by account-start detection.
+    """
     now = datetime.now(UTC)
-    cutoff = now - timedelta(days=days)
+    cutoff = now - timedelta(days=days) if days is not None else None
 
     rounds = transport.ws_paginate(
         [
@@ -211,7 +215,7 @@ def fetch_timeline(
                     continue
                 ts = item.get("timestamp") or ""
                 try:
-                    if parse_timestamp(ts) < cutoff:
+                    if cutoff is not None and parse_timestamp(ts) < cutoff:
                         continue
                 except (ValueError, TypeError):
                     pass  # unparseable timestamp: keep the item
@@ -246,3 +250,45 @@ def fetch_timeline(
             except (ValueError, TypeError, ArithmeticError):
                 pass
     return TimelineResult(events=events, buckets=buckets, pages=pages)
+
+
+# Event types that mark the start of the account lifecycle (activityLog).
+CREATION_EVENT_TYPES = frozenset(
+    {"CUSTOMER_CREATED", "SECURITIES_ACCOUNT_CREATED", "VERIFICATION_TRANSFER_ACCEPTED"}
+)
+
+
+def detect_account_start(
+    transport: Transport,
+    *,
+    timeout: float = 8.0,
+    max_rounds: int = 10,
+) -> tuple[str, str] | None:
+    """Find the earliest account-start signal from the timeline.
+
+    Signals (earliest wins): CUSTOMER_CREATED / SECURITIES_ACCOUNT_CREATED /
+    VERIFICATION_TRANSFER_ACCEPTED (activityLog) or the earliest deposit-bucket
+    event (timelineTransactions). Returns (YYYY-MM-DD, source_label) or None
+    when no signal is found.
+    """
+    result = fetch_timeline(
+        transport, days=None, timeout=timeout, max_rounds=max_rounds
+    )
+    best: tuple[datetime, str] | None = None
+    for ev in result.events:
+        if ev.event_type not in CREATION_EVENT_TYPES and ev.bucket != "deposits":
+            continue
+        try:
+            dt = parse_timestamp(ev.timestamp)
+        except (ValueError, TypeError):
+            continue
+        label = (
+            ev.event_type
+            if ev.event_type in CREATION_EVENT_TYPES
+            else "earliest deposit"
+        )
+        if best is None or dt < best[0]:
+            best = (dt, label)
+    if best is None:
+        return None
+    return best[0].date().isoformat(), best[1]

@@ -21,11 +21,32 @@ tr-cli login                # v2 push flow: approve the prompt in the TR mobile 
 tr-cli session status       # local check of the saved session (no network)
 tr-cli session refresh      # rotate session cookies via /api/v1/auth/web/session
 tr-cli portfolio            # positions + cash + totals + YTD
+tr-cli history              # daily value curve, start auto-detected from account history
 tr-cli timeline             # merged event feed (transactions + activity log), ~90 days
 tr-cli timeline --bucket dividends
 tr-cli rates DE0005140008 US0378331005
 tr-cli details US0378331005
 ```
+
+### History (value curve backfill)
+
+`tr-cli history` builds a daily portfolio value curve from CURRENT holdings +
+per-position daily close series (`tradeAggregateHistory`), over one WS
+connection. The **start date is auto-detected** from the account timeline
+(earliest of `CUSTOMER_CREATED` / `SECURITIES_ACCOUNT_CREATED` /
+`VERIFICATION_TRANSFER_ACCEPTED` / earliest deposit), overridable with
+`--since YYYY-MM-DD`. `--days N` (default 90, max 730) is the fallback window
+when no start signal is detectable. The `note` states the detected source
+(e.g. `account created 2025-11-02`); the server caps daily bars at ~200, so
+very long windows are truncated with a note.
+
+For each day, `total` = Σ (qty × close) over positions that have a bar that
+day, plus the **current cash** (constant). Positions bought mid-window appear
+across their whole price history and cash is held at today's value — hence
+`approximate: true`. `--json` contract for scripts: `{ok, start_date, end_date,
+days, approximate, note, series: [{date, total, cash|null}]}`. Human output is
+a compact date/total/Δ table. Note: `history` totals include cash;
+`portfolio.totalValue` does not.
 
 ### Timeline
 

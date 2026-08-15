@@ -238,3 +238,45 @@ App version served: `2.2632.29` (index.js + HTML meta). TR_APP_VERSION default b
   and totalValue 182961.06 unchanged.
 - WS budget this session: 7 connections total (3 research probes + 4 verification),
   all spaced, zero 429s.
+
+### history command — full-series verification (2026-08-15, Eve + this session)
+
+- `tradeAggregateHistory` returns the FULL daily-bar series in one reply:
+  `{aggregates:[{time(ms), open, high, low, close, volume}], expectedClosingTime,
+  resolution, lastAggregateEndTime, unit, sourceCurrency}` — 159 bars YTD for
+  IE00B4L5Y983 @ LSX; first open == the YTD base (111.115), last close ==
+  current price.
+- tr-cli `history` fetches positions+cash → instruments → series in ONE WS
+  connection (sequential rounds via `ws.rounds` builder), then computes per-day
+  Σ(qty×close) over positions with a bar + constant current cash.
+- Missing-bar policy: a position without a bar on a date is excluded that day;
+  a position whose series fails is excluded from the whole curve (noted).
+- `approximate: true` because current quantities are applied retroactively and
+  cash is constant — exact curves require the local snapshot store (Eve's watcher).
+
+### history — start-date auto-detection (steer 2026-08-15)
+
+- Start = earliest of timeline signals: CUSTOMER_CREATED /
+  SECURITIES_ACCOUNT_CREATED / VERIFICATION_TRANSFER_ACCEPTED (activityLog) or
+  the earliest deposit-bucket event (timelineTransactions). `--since YYYY-MM-DD`
+  overrides; `--days` (default 90) is the fallback when no signal is found.
+- Server-side daily-bar cap measured: 180d window → full 126 bars; 365d and
+  730d windows BOTH → 202 bars starting 2025-10-28 (last bar = last trading
+  day). The cap is ~200 daily bars regardless of window; the CLI detects
+  truncation (first bar > requested start + 3d) and notes it.
+- The last close of each series equals the current price within quote drift
+  (verified side-by-side vs ticker last, all EUR, LSX).
+
+### history — live verification (2026-08-15, spaced)
+
+- `tr-cli --json history` (auto-detect): start = `securities account created
+  2023-10-07` (detected from timelineActivityLog); series = 202 points
+  2025-10-28 → 2026-08-14 (server ~200-bar cap → truncation noted). Curve:
+  160.4k (Oct-25) → 186.0k (Jun-26) → 169.7k (Aug-14), cash 3552.53 constant.
+- Last-day gap vs today's snapshot explained by the missing-bar policy:
+  Stoxx 600 (LU0908500753) last LSX bar is 08-13 (thin trading) → excluded on
+  08-14 → "last point covers 7/8 positions". Per-position last closes equal
+  ticker prices within <0.3% (checked 8/8 ISINs, all unit EUR @ LSX).
+- End-to-end: 2 WS connections per `tr-cli history` run (1 detection + 1
+  rounds), 0 HTTP beyond account; zero 429s this session (5 WS total incl.
+  probes, all spaced).
