@@ -1,8 +1,5 @@
-# history Specification
+## MODIFIED Requirements
 
-## Purpose
-Backfill a daily portfolio value curve from current holdings (positions + cash + per-position daily close series), with account-start auto-detection and per-position forward-filling so the curve is gap-free.
-## Requirements
 ### Requirement: history command
 The CLI SHALL provide a `history` command that builds a daily portfolio value series from Trade Republic's official portfolio-chart REST endpoint `GET /api-gateway/portfolio-chart/v2/chart?secAccNo=<secAccNo>&range=<1y|max>&currency=EUR` (secAccNo from `GET /api/v2/auth/account`; ranges 3y/6m return HTTP 400 server-side and SHALL NOT be used). `range=1y` daily points SHALL win over `range=max` coarser points on overlapping dates; the curve SHALL start at the first NON-ZERO netValue point; optional local collector snapshots SHALL override chart points on matching dates. The series total SHALL be the chart `netValue` (positions only, matching `portfolio.totalValue` and the TR app), and `approximate` SHALL be `false` (the chart reflects real historical holdings — no retroactive-quantity approximation). The old per-position tradeAggregateHistory-based backfill is replaced (tradeAggregateHistory remains only for per-position YTD).
 
@@ -32,13 +29,6 @@ The CLI SHALL reconstruct historical cash from the REST timeline transactions fe
 - **WHEN** the transactions feed has more than one page
 - **THEN** the CLI follows `cursors.after` via `olderThan` until the feed is exhausted
 
-### Requirement: missing-bar exclusion
-The CLI SHALL exclude a position from the WHOLE series when its series fetch fails entirely (no bars at all), and SHALL never fill prices before a position's first bar.
-
-#### Scenario: failed series fetch
-- **WHEN** a position's `tradeAggregateHistory` subscription fails or times out
-- **THEN** the position is omitted from every day's total (listed in the note) and the command still succeeds
-
 ### Requirement: JSON output contract
 The CLI SHALL emit `--json` as `{ok, start_date, end_date, days, approximate, note, coverage, series:[{date, total, cash}]}` where `total` = positions (netValue), `cash` = reconstructed cash (string; null only when unavailable), `approximate` = false, the note includes granularity + cash reconstruction summary, and `coverage` describes the sources. Real account numbers (secAccNo, cashAccountNumber) SHALL NOT appear in any output or committed artifact.
 
@@ -49,11 +39,3 @@ The CLI SHALL emit `--json` as `{ok, start_date, end_date, days, approximate, no
 #### Scenario: human output
 - **WHEN** the user runs `tr-cli history` without `--json`
 - **THEN** a compact date/total/cash/Δ table is rendered with the note line
-
-### Requirement: human output
-The CLI SHALL render a compact table (date, total, Δ vs previous day) for terminal use.
-
-#### Scenario: compact table
-- **WHEN** the user runs `tr-cli history` without `--json`
-- **THEN** the output shows one row per date with total and day-over-day change
-
