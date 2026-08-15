@@ -1,0 +1,28 @@
+[project]
+name = "tr-cli"
+version = "0.1.0"
+description = "Small unofficial Trade Republic CLI: login (v2 push), portfolio, rates, details"
+readme = "README.md"
+authors = [
+    { name = "Daniel Wallner", email = "daniel.wallner.1993@gmx.at" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.34.2",
+    "typer>=0.27.1",
+    "websockets>=17.0.1",
+]
+
+[project.scripts]
+tr-cli = "tr_cli.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.6,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.3",
+]
