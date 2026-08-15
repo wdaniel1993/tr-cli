@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets / sessions (defense-in-depth; real data lives in ~/.tr-cli/)
+.env
+.env.*
+.tr-cli/
+cookies.txt
+*.cookies.txt
+credentials
