@@ -92,9 +92,29 @@ Close code `3003 (registered)` = another session claimed the same registration.
 
 ## Real-account spike record (append-only)
 
-Planned, rate-limited, spaced. Record here, verbatim-ish:
+### Passive probe — 2026-08-15 (no auth, no account)
+
+- `GET https://app.traderepublic.com/login` with Chrome UA → `200`, 5414 bytes, no IP block on plain page loads.
+- AWS WAF challenge confirmed: `challenge.js` served from
+  `https://8dc6d8e337ce.330bb79d.eu-central-1.token.awswaf.com/<id>/<id>/challenge.js`
+  (matches pytr's `*.token.awswaf.com` host pin). The v2 API flow does not need
+  a token from it (pytr runs tokenless; tr-pebble session memory confirms WAF is
+  not enforced on the API), but `TR_WAF_TOKEN` remains the escape hatch.
+
+### Pending — requires Daniel to approve a push in the TR mobile app
+
+Record here, verbatim-ish:
 - exact login response bodies (redacted) + cookie names/shapes,
 - which `x-tr-device-info` fields TR actually requires,
 - whether tokenless v2 login works from this IP,
 - portfolio/cash/ticker response shapes observed on a real account,
 - any 429 occurrences + their `meta` payloads.
+
+Run (from this repo, one attempt, no auto-retry):
+
+```bash
+TR_PHONE=+49... TR_PIN=... uv run tr-cli login   # approve the push on your phone
+uv run tr-cli portfolio
+uv run tr-cli rates <ISIN>
+uv run tr-cli details <ISIN>
+```

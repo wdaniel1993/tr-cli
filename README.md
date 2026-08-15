@@ -41,7 +41,12 @@ tr-cli --mock details US0378331005
 
 ## Scripting
 
-`--json` on every command prints one JSON document to stdout.
+`--json` (global flag, before the subcommand) prints one JSON document to stdout:
+
+```bash
+tr-cli --json portfolio
+tr-cli --json rates US0378331005
+```
 
 Exit codes: `0` ok · `1` generic · `2` usage · `3` needs-login · `4` rate-limited ·
 `5` login-failed · `6` protocol error.

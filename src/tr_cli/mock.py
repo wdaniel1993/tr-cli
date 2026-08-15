@@ -225,7 +225,11 @@ class MockTransport(Transport):
         for key, payload in subscriptions:
             topic = payload.get("type")
             if topic == "compactPortfolioByType":
-                results[key] = dict(FIXTURE_PORTFOLIO)
+                results[key] = (
+                    {"categories": []}
+                    if self.mode == "empty_portfolio"
+                    else dict(FIXTURE_PORTFOLIO)
+                )
             elif topic == "cash":
                 results[key] = dict(FIXTURE_CASH)
             elif topic == "instrument":

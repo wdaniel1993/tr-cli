@@ -43,6 +43,17 @@ def test_portfolio_assembly():
     assert p.cash.available == "1000.00"
 
 
+def test_portfolio_empty():
+    m = MockTransport(mode="empty_portfolio")
+    from tr_cli.auth import login_flow
+
+    login_flow(m, PHONE, PIN, DEVICE_ID)
+    pf = client.portfolio(m)
+    assert pf.positions == []
+    assert str(pf.total_value) == "0.00"
+    assert pf.cash.total == "1234.56"
+
+
 def test_portfolio_missing_ticker():
     m = _logged_in()
     m.missing_tickers.add("US0378331005.LSX")
