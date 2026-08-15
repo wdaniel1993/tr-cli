@@ -48,15 +48,16 @@ def render_portfolio(portfolio: Portfolio) -> str:
         lines.append("(no positions)")
     lines.append("")
     cash = portfolio.cash
-    total = str(cash.total)
-    extra = (
-        f"   available: {cash.available}"
-        if cash.available is not None and cash.available != total
-        else ""
-    )
-    lines.append(f"CASH  total: {total}{extra}")
+    if cash.items:
+        lines.append("CASH (available, per currency)")
+        for item in cash.items:
+            lines.append(f"  {item.currency_id}: {_num(item.amount, 2)}")
+        if len(cash.items) > 1:
+            lines.append(f"  TOTAL: {_num(str(cash.total), 2)}")
+    else:
+        lines.append("CASH: (none)")
     lines.append("")
-    lines.append(f"TOTAL VALUE: {portfolio.total_value}")
+    lines.append(f"TOTAL VALUE (positions only): {portfolio.total_value}")
     return "\n".join(lines)
 
 

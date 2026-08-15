@@ -247,7 +247,13 @@ def portfolio() -> None:
             }
             for p in result.positions
         ],
-        "cash": {"total": result.cash.total, "available": result.cash.available},
+        "cash": {
+            "items": [
+                {"currencyId": i.currency_id, "amount": i.amount}
+                for i in result.cash.items
+            ],
+            "total": str(result.cash.total),
+        },
         "totalValue": str(result.total_value),
     }
     _emit(data, _ctx_json(), render_mod.render_portfolio(result))

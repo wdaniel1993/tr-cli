@@ -152,3 +152,17 @@ re-runnable with a logged-in session). Spacing: 1 login + 2 HTTP GETs +
 - `tr-cli --json rates DE000BASF111` → `{ok, quotes:[{instrumentId, name, price, ask}]}`
 - `tr-cli --json details DE000BASF111` → 6/6 topics
 - `tr-cli --json portfolio` → `{ok, positions[8] (enriched names + live prices), cash, totalValue}`
+
+### Cash vs availableCashForPayout — 2026-08-15 (authenticated probe, redacted)
+
+- One WS connection, two subscriptions: `cash` and `availableCashForPayout`.
+- Both returned the **identical** payload:
+  `[{"accountNumber": "<redacted>", "currencyId": "EUR", "amount": 1234.56}]`
+- The `cash` amount therefore IS the app's "available cash" (Daniel's app showed
+  EUR 1234.56 on the same day). `availableCashForPayout` is a confirmed-identical
+  alternative; tr-cli uses `cash` alone.
+- `accountNumber` is a 10-digit string (the cash account id) — redacted here;
+  tr-cli's CLI JSON output omits it.
+- Session refresh on an older session DID rotate `JSESSIONID` + `tr_session`
+  (the spike record above noted no rotation on a fresh session — rotation
+  happens near TTL expiry).

@@ -25,6 +25,17 @@ tr-cli rates DE0005140008 US0378331005
 tr-cli details US0378331005
 ```
 
+### Output semantics (verified against the real app, 2026-08-15)
+
+- **Cash**: the `cash` topic returns one balance per cash account/currency
+  (`[{accountNumber, currencyId, amount}]`). The amount is the **available**
+  cash for that currency — verified identical to the `availableCashForPayout`
+  topic and to the app's "available cash" display (EUR 1234.56 matched exactly).
+- **TOTAL VALUE**: sum of position net values **only** — cash is NOT included.
+  This matches the app's "portfolio value" (verified by arithmetic: positions
+  180000.00 vs app 180050.00 ≈ EUR 51 quote drift; positions + cash would be
+  181234.56, which does not match).
+
 Phone and PIN: `--phone`/`--pin` flags, `TR_PHONE`/`TR_PIN` env vars, or interactive prompts.
 Session cookies are stored at `~/.tr-cli/cookies.txt` (0600) — never in this repo.
 

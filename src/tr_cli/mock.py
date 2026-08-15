@@ -95,7 +95,11 @@ FIXTURE_PORTFOLIO = {
     ]
 }
 
-FIXTURE_CASH = {"total": "1234.56", "available": "1000.00", "currency": "EUR"}
+# Real wire shape (verified 2026-08-15): array of per-account/per-currency balances.
+FIXTURE_CASH = [
+    {"accountNumber": "0000000001", "currencyId": "EUR", "amount": 1234.56},
+    {"accountNumber": "0000000002", "currencyId": "USD", "amount": 1000.00},
+]
 
 FIXTURE_STOCK_DETAILS = {
     "US0378331005": {
@@ -231,7 +235,7 @@ class MockTransport(Transport):
                     else dict(FIXTURE_PORTFOLIO)
                 )
             elif topic == "cash":
-                results[key] = dict(FIXTURE_CASH)
+                results[key] = [dict(c) for c in FIXTURE_CASH]
             elif topic == "instrument":
                 isin = payload.get("id", "")
                 if isin in FIXTURE_INSTRUMENTS:

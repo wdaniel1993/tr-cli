@@ -39,8 +39,12 @@ def test_portfolio_assembly():
     assert apple.price == "232.05"
     assert apple.net_value is not None and str(apple.net_value) == "2320.50"
     assert str(p.total_value) == "2402.70"
-    assert p.cash.total == "1234.56"
-    assert p.cash.available == "1000.00"
+    assert [(i.currency_id, i.amount) for i in p.cash.items] == [
+        ("EUR", "1234.56"),
+        ("USD", "1000.0"),
+    ]
+    assert str(p.cash.total) == "2234.56"
+    assert str(p.cash.amount_for("EUR")) == "1234.56"
 
 
 def test_portfolio_empty():
@@ -51,7 +55,7 @@ def test_portfolio_empty():
     pf = client.portfolio(m)
     assert pf.positions == []
     assert str(pf.total_value) == "0.00"
-    assert pf.cash.total == "1234.56"
+    assert str(pf.cash.total) == "2234.56"
 
 
 def test_portfolio_missing_ticker():
@@ -94,3 +98,41 @@ def test_details_partial():
     # unknown ISIN -> only topics that answered
     topics2 = client.details(m, "XX0000000000")
     assert "instrument" not in topics2
+
+
+def test_parse_cash_array_shape():
+    """Real wire shape: array of {accountNumber, currencyId, amount}."""
+    cash = client._parse_cash(
+        [{"accountNumber": "0123456789", "currencyId": "EUR", "amount": 1234.56}]
+    )
+    assert len(cash.items) == 1
+    assert cash.items[0].currency_id == "EUR"
+    assert cash.items[0].amount == "1234.56"
+    assert cash.items[0].account_number == "0123456789"
+    assert str(cash.total) == "1234.56"
+
+
+def test_parse_cash_multicurrency_aggregation():
+    cash = client._parse_cash(
+        [
+            {"accountNumber": "1", "currencyId": "EUR", "amount": 10.5},
+            {"accountNumber": "2", "currencyId": "USD", "amount": 20},
+            {"accountNumber": "3", "currencyId": "EUR", "amount": 1.25},
+        ]
+    )
+    assert str(cash.total) == "31.75"
+    assert str(cash.amount_for("EUR")) == "11.75"
+    assert cash.amount_for("USD") == 20
+
+
+def test_parse_cash_defensive_shapes():
+    # single dict with amount -> one item
+    cash = client._parse_cash({"currencyId": "EUR", "amount": "5.0"})
+    assert cash.items[0].currency_id == "EUR" and cash.items[0].amount == "5.0"
+    # legacy {total, available} dict -> one unknown-currency item (never zeroes out)
+    cash = client._parse_cash({"total": "7.0", "available": "7.0"})
+    assert str(cash.total) == "7.00"
+    # junk -> empty
+    assert client._parse_cash(None).items == []
+    assert client._parse_cash("nope").items == []
+    assert client._parse_cash([{"foo": "bar"}]).items == []

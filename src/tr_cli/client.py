@@ -62,10 +62,51 @@ class Position:
 
 
 @dataclass
+class CashItem:
+    """One cash balance entry (real wire shape: `{accountNumber, currencyId, amount}`).
+
+    `amount` is the *available* cash for that currency — verified live
+    (2026-08-15) to equal the `availableCashForPayout` topic and the TR app's
+    "available cash" display.
+    """
+
+    currency_id: str
+    amount: str
+    account_number: str | None = None
+
+
+@dataclass
 class CashBalance:
-    total: str = "0"
-    available: str | None = None
-    raw: dict[str, Any] = field(default_factory=dict)
+    """Aggregated cash balances, one item per currency (per cash account).
+
+    `total` sums all item amounts. Note: the TR app's "portfolio value" does
+    NOT include cash — see `Portfolio.total_value`.
+    """
+
+    items: list[CashItem] = field(default_factory=list)
+
+    @property
+    def total(self) -> Decimal:
+        total = Decimal(0)
+        for item in self.items:
+            try:
+                total += Decimal(item.amount)
+            except (ValueError, TypeError, ArithmeticError):
+                continue
+        return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    def amount_for(self, currency_id: str) -> Decimal | None:
+        """Sum of all item amounts for a currency (aggregates per currencyId)."""
+        total = Decimal(0)
+        found = False
+        for item in self.items:
+            if item.currency_id == currency_id:
+                try:
+                    total += Decimal(item.amount)
+                    found = True
+                except (ValueError, TypeError, ArithmeticError):
+                    continue
+        return total if found else None
 
 
 @dataclass
@@ -123,16 +164,46 @@ def _normalize_positions(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _parse_cash(payload: Any) -> CashBalance:
-    if not isinstance(payload, dict):
+    """Parse the real `cash` topic payload.
+
+    Real wire shape (verified 2026-08-15): an ARRAY of per-account/per-currency
+    balances `[{accountNumber, currencyId, amount}, ...]`. Defensively also
+    accepts a single dict with `amount` (and the legacy `{total, available}`
+    object, mapped to one item with an unknown currency) so a shape change does
+    not silently zero out the cash section.
+    """
+    entries: list[Any]
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        if payload.get("amount") is not None:
+            entries = [payload]
+        elif payload.get("total") is not None or payload.get("available") is not None:
+            entries = [
+                {
+                    "currencyId": "?",
+                    "amount": payload.get("total") or payload.get("available") or "0",
+                }
+            ]
+        else:
+            return CashBalance()
+    else:
         return CashBalance()
-    total = payload.get("total") or payload.get("available") or "0"
-    return CashBalance(
-        total=str(total),
-        available=str(payload.get("available"))
-        if payload.get("available") is not None
-        else None,
-        raw=payload,
-    )
+
+    items: list[CashItem] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("amount") is None:
+            continue
+        items.append(
+            CashItem(
+                currency_id=str(entry.get("currencyId") or "?"),
+                amount=str(entry["amount"]),
+                account_number=str(entry["accountNumber"])
+                if entry.get("accountNumber") is not None
+                else None,
+            )
+        )
+    return CashBalance(items=items)
 
 
 def _enrich(transport: Transport, items: list[dict[str, Any]], timeout: float) -> None:
@@ -176,6 +247,14 @@ def _enrich(transport: Transport, items: list[dict[str, Any]], timeout: float) -
 
 
 def portfolio(transport: Transport, *, timeout: float = 5.0) -> Portfolio:
+    """Portfolio positions + cash.
+
+    `totalValue` semantics: sum of position net values ONLY — cash is NOT
+    included. This matches the TR app's "portfolio value" (verified against
+    Daniel's same-day numbers: app 180050.00 vs positions-sum 180000.00 with
+    ~EUR 50 quote drift; positions + cash would have been 181234.56, which
+    does not match the app).
+    """
     acct = account(transport)
     sec_acc_no = acct.securities_account_number
     if not sec_acc_no:

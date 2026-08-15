@@ -23,7 +23,9 @@ def test_login_and_data_commands(cli_env):
     r = run("portfolio")
     assert r.exit_code == 0, r.output
     assert "Apple" in r.output
-    assert "TOTAL VALUE" in r.output
+    assert "TOTAL VALUE (positions only)" in r.output
+    assert "EUR: 1234.56" in r.output
+    assert "USD: 1000" in r.output
 
     r = run("rates", "US0378331005", "DE0005140008")
     assert r.exit_code == 0, r.output
@@ -48,6 +50,12 @@ def test_json_output(cli_env):
     assert data["ok"] is True
     assert data["totalValue"] == "2402.70"
     assert len(data["positions"]) == 2
+    assert data["cash"]["items"] == [
+        {"currencyId": "EUR", "amount": "1234.56"},
+        {"currencyId": "USD", "amount": "1000.0"},
+    ]
+    assert data["cash"]["total"] == "2234.56"
+    assert all("accountNumber" not in item for item in data["cash"]["items"])
 
 
 def test_rate_limit_message(cli_env, monkeypatch):
