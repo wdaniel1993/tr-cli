@@ -18,11 +18,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import websockets  # noqa: E402
+import websockets
 
-from tr_cli import session as session_mod  # noqa: E402
-from tr_cli.delta import decode_response  # noqa: E402
-from tr_cli.protocol import USER_AGENT, WS_URL, ws_connect_message  # noqa: E402
+from tr_cli import session as session_mod
+from tr_cli.delta import decode_response
+from tr_cli.protocol import USER_AGENT, WS_URL, ws_connect_message
 
 
 async def probe(isin: str):
@@ -72,7 +72,10 @@ async def probe(isin: str):
         got = {}
         while asyncio.get_running_loop().time() < deadline:
             try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=max(0.5, deadline - asyncio.get_running_loop().time()))
+                raw = await asyncio.wait_for(
+                    ws.recv(),
+                    timeout=max(0.5, deadline - asyncio.get_running_loop().time()),
+                )
             except TimeoutError:
                 break
             frame = raw.decode() if isinstance(raw, bytes) else str(raw)

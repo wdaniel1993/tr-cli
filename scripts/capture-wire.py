@@ -21,10 +21,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import websockets  # noqa: E402
+import websockets
 
-from tr_cli import session as session_mod  # noqa: E402
-from tr_cli.protocol import (  # noqa: E402
+from tr_cli import session as session_mod
+from tr_cli.delta import decode_response
+from tr_cli.protocol import (
     ACCOUNT_ENDPOINT,
     SESSION_ENDPOINT,
     USER_AGENT,
@@ -32,8 +33,7 @@ from tr_cli.protocol import (  # noqa: E402
     login_headers,
     ws_connect_message,
 )
-from tr_cli.transport import RealTransport  # noqa: E402
-from tr_cli.delta import decode_response  # noqa: E402
+from tr_cli.transport import RealTransport
 
 
 def redact(obj):
@@ -76,8 +76,7 @@ def http_capture(transport: RealTransport, device_id: str):
     print("=" * 70)
 
     # 1. Account (cookie auth) — request() prepends API_BASE itself.
-    resp = transport.request("GET", ACCOUNT_ENDPOINT,
-                             headers=login_headers(device_id))
+    resp = transport.request("GET", ACCOUNT_ENDPOINT, headers=login_headers(device_id))
     print(f"\nGET {ACCOUNT_ENDPOINT} -> {resp.status_code}")
     print(f"  response headers: {json.dumps(sorted(resp.headers.keys()))}")
     account = None
@@ -90,8 +89,7 @@ def http_capture(transport: RealTransport, device_id: str):
 
     # 2. Session refresh (cookie auth) — cookie rotation check
     before = set(transport.cookies_snapshot())
-    resp2 = transport.request("GET", SESSION_ENDPOINT,
-                              headers=login_headers(device_id))
+    resp2 = transport.request("GET", SESSION_ENDPOINT, headers=login_headers(device_id))
     after = set(transport.cookies_snapshot())
     print(f"\nGET {SESSION_ENDPOINT} -> {resp2.status_code}")
     print(f"  cookies before: {sorted(before)}")
@@ -99,7 +97,9 @@ def http_capture(transport: RealTransport, device_id: str):
     print(f"  cookie changes: {sorted(after - before) or 'none'}")
     if resp2.body.strip():
         try:
-            print(f"  body structure: {json.dumps(redact(resp2.json()), indent=2)[:800]}")
+            print(
+                f"  body structure: {json.dumps(redact(resp2.json()), indent=2)[:800]}"
+            )
         except (ValueError, TypeError):
             print(f"  body (non-JSON): {resp2.body[:120]!r}")
     return account
@@ -125,7 +125,13 @@ async def ws_capture(cookie_str: str, sec_acc_no: str | None, isin: str, exchang
             ("ticker", {"type": "ticker", "id": f"{isin}.{exchange}"}),
         ]
         if sec_acc_no:
-            subs.insert(1, ("portfolio", {"type": "compactPortfolioByType", "secAccNo": sec_acc_no}))
+            subs.insert(
+                1,
+                (
+                    "portfolio",
+                    {"type": "compactPortfolioByType", "secAccNo": sec_acc_no},
+                ),
+            )
 
         previous: dict[str, str] = {}
         pending = {}
@@ -141,14 +147,19 @@ async def ws_capture(cookie_str: str, sec_acc_no: str | None, isin: str, exchang
         deadline = asyncio.get_running_loop().time() + 8.0
         while pending and asyncio.get_running_loop().time() < deadline:
             try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=max(0.1, deadline - asyncio.get_running_loop().time()))
+                raw = await asyncio.wait_for(
+                    ws.recv(),
+                    timeout=max(0.1, deadline - asyncio.get_running_loop().time()),
+                )
             except TimeoutError:
                 break
             frame = raw.decode() if isinstance(raw, bytes) else str(raw)
             sid, code, payload = decode_response(frame, previous)
             label = pending.get(sid)
             if code in ("A", "D"):
-                print(f"< [{label}] frame code={code} structure: {json.dumps(redact(payload), indent=2)[:2500]}")
+                print(
+                    f"< [{label}] frame code={code} structure: {json.dumps(redact(payload), indent=2)[:2500]}"
+                )
                 await ws.send(f"unsub {sid}")
                 pending.pop(sid, None)
             elif code in ("E", "C"):
@@ -172,6 +183,7 @@ def main() -> int:
 
     transport = RealTransport(initial_cookies=cookies)
     from tr_cli.protocol import stable_device_id
+
     account = http_capture(transport, stable_device_id())
 
     sec_acc_no = find_account_number(account) if isinstance(account, dict) else None
