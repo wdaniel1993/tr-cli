@@ -75,7 +75,7 @@ to `~/.tr-cli/cookies.txt` (0600).
 | `instrument` | `{"id": ISIN}` | name/shortName/typeId/currency/exchangeIds/exchanges/tags |
 | `ticker` | `{"id": "ISIN.EXCHANGE"}` | `{last:{price,…}, ask:{price}, bid:{price}}` — bond prices ÷ 100 |
 | `stockDetails` | `{"id": ISIN}` | company profile, dividend, market data |
-| `performance` | `{"id": "ISIN.EXCHANGE"}` | `{perf:[{timestamp, price}], range}` |
+| `performance` | `{"id": "ISIN.EXCHANGE"}` | **aggregate price points only** (verified live 2026-08-15): `{high_1d, low_1d, price_5d, price_1m, price_3m, price_6m, price_1y, price_3y, price_5y, high_52w, low_52w}` — NOT a `{perf:[{timestamp,price}],range}` series (research-derived shape was wrong for protocol v31; `range` arg is ignored) |
 | `instrumentSuitability` | `{"instrumentId": ISIN}` | suitability flags |
 | `neonNews` | `{"isin": ISIN}` | `[{headline, createdAt}]` |
 
@@ -86,6 +86,19 @@ to `~/.tr-cli/cookies.txt` (0600).
 (trades/dividends — on ActivityLog, not Transactions), `timelineDetailV2`,
 `searchTags`, `watchlists`, `priceForOrder`, `homeInstrumentExchange`,
 `savingsPlans`, `compactSavingsPlans`, `pendingTimelineEventCash`.
+
+**History topics status (verified live 2026-08-15):**
+- `portfolioAggregateHistory` → **DEAD on protocol v31**: `BAD_SUBSCRIPTION_TYPE
+  "Unknown topic type: portfolioAggregateHistory.31"` (the app's portfolio
+  chart must use a newer/renamed topic — not yet identified).
+- `performance` → aggregate points only (see table above); **no daily series**.
+- `timelineActivityLog` → **WORKS**: `{items: [{id, timestamp, title, subtitle,
+  action, trailing, eventType, ...}], cursors}` — real event history
+  (dividends, transfers, reports). Best available "history" topic.
+→ The API serves point-in-time state + aggregate milestones + an event log,
+  but NO continuous per-day series. A local snapshot store (like tr-cli's
+  `~/.tr-cli/history/` used by the daily watcher) is therefore the correct
+  way to build day-over-day position/value history.
 
 Close code `3003 (registered)` = another session claimed the same registration.
 
