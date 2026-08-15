@@ -50,6 +50,7 @@ unofficial implementations: **pytr-org/pytr**, **Erim32/Trade-Republic**,
 | `tr_device` | device fingerprint TR uses to recognise repeat logins |
 | `tr_session` | session token (NightOwl07 harvests this as the primary token) |
 | `tr_claims` | JWT-ish payload with sessionId + jurisdiction (app domain) |
+| `tr_external_id` | external user id (observed on real login, 2026-08-15) |
 | `aws-waf-token` | WAF bypass token (app domain; only when token mode used) |
 
 tr-cli persists `{JSESSIONID, tr_refresh, tr_device, tr_session, tr_claims, …}`
@@ -70,7 +71,7 @@ to `~/.tr-cli/cookies.txt` (0600).
 | Topic | Args | Returns |
 |---|---|---|
 | `compactPortfolioByType` | `{"secAccNo": …}` | `{categories:[{type, positions:[{isin, netSize, averageBuyIn, …}]}]}` — legacy `compactPortfolio` uses `positions:[{instrumentId, …}]` |
-| `cash` | — | `{total, available, currency, …}` |
+| `cash` | — | **array** `[{accountNumber, currencyId, amount}]` (one entry per cash account; research-derived `{total, available}` object is NOT what the server sends) |
 | `instrument` | `{"id": ISIN}` | name/shortName/typeId/currency/exchangeIds/exchanges/tags |
 | `ticker` | `{"id": "ISIN.EXCHANGE"}` | `{last:{price,…}, ask:{price}, bid:{price}}` — bond prices ÷ 100 |
 | `stockDetails` | `{"id": ISIN}` | company profile, dividend, market data |
@@ -101,20 +102,53 @@ Close code `3003 (registered)` = another session claimed the same registration.
   a token from it (pytr runs tokenless; tr-pebble session memory confirms WAF is
   not enforced on the API), but `TR_WAF_TOKEN` remains the escape hatch.
 
-### Pending — requires Daniel to approve a push in the TR mobile app
+### Real-account spike — 2026-08-15 ✅ (authenticated, redacted)
 
-Record here, verbatim-ish:
-- exact login response bodies (redacted) + cookie names/shapes,
-- which `x-tr-device-info` fields TR actually requires,
-- whether tokenless v2 login works from this IP,
-- portfolio/cash/ticker response shapes observed on a real account,
-- any 429 occurrences + their `meta` payloads.
+All shapes below recorded with `scripts/capture-wire.py` (values masked;
+re-runnable with a logged-in session). Spacing: 1 login + 2 HTTP GETs +
+4 WS connections over ~10 minutes. **No 429 observed.**
 
-Run (from this repo, one attempt, no auto-retry):
+**Login (tokenless v2 push) — WORKS from this IP**
+- `POST /api/v2/auth/web/login {phoneNumber, pin}` with the standard
+  `login_headers()` (NO `x-aws-waf-token`) → push to app → poll → `CONFIRMED`.
+- 6 cookies landed: `JSESSIONID`, `tr_refresh`, `tr_device`, `tr_session`,
+  `tr_claims`, `tr_external_id` → persisted to `~/.tr-cli/cookies.txt`.
+- Device fingerprint: the 10-field `x-tr-device-info` (stableDeviceId +
+  browser/version/os/osVersion/timezone/timezoneOffset/screen/languages/cores)
+  was accepted as-is. No extra required fields discovered.
 
-```bash
-TR_PHONE=+49... TR_PIN=... uv run tr-cli login   # approve the push on your phone
-uv run tr-cli portfolio
-uv run tr-cli rates <ISIN>
-uv run tr-cli details <ISIN>
-```
+**HTTP (cookie auth)**
+- `GET /api/v2/auth/account` → 200. Full profile structure confirmed
+  (redacted): `phoneNumber`, `jurisdiction`, `name{first,last}`,
+  `email{address,verified}`, `postalAddress{...}`, `birthdate`,
+  `mainTaxResidency{tin,countryCode}`, `cashAccount{iban,bic,bankName}`,
+  `referenceAccountList[{iban,bic,bankName,logoUrl}]`,
+  `securitiesAccountNumber` (string — needed for `compactPortfolioByType`),
+  `experience{stock,fund,derivative,crypto,bond}`, `personId`, …
+  Response headers: plain (no `set-cookie`, no `x-tr-*` custom headers on 200).
+- `GET /api/v1/auth/web/session` → 200, **no cookie rotation observed** on a
+  fresh session (research-derived "rotates JSESSIONID + tr_session" did not
+  fire; likely only near TTL expiry).
+
+**WebSocket (cookie header auth — confirmed working)**
+- `connect 31 {"locale":"en","platformId":"webtrading","platformVersion":"chrome - 94.0.4606","clientId":"app.traderepublic.com","clientVersion":"5582"}` → reply `connected` ✓
+- `cash` → **array** `[{accountNumber, currencyId, amount}]`
+- `compactPortfolioByType {"secAccNo": …}` → `{categories:[{categoryType, positions:[{isin, averageBuyIn, netSize, virtualSize, status, instrumentType, name, derivativeInfo|null, bondInfo|null, imageId}]}]}`
+- `instrument {"id": ISIN}` → `{active, exchangeIds[], exchanges[{slug, active, nameAtExchange, symbolAtExchange, band, firstSeen, lastSeen, fractionalTrading{minOrderSize,stepSize,orderAmountLimitCurrency,minOrderAmount,…}, dmaTrading{…}, settlementRoute}]}`
+- `ticker` → `{bid,ask,last,pre,open: {time, price, size}}` (strings for price/size)
+- **`ticker` id constraint (new finding):** `ISIN.EXCHANGE` must use a slug the
+  instrument actually trades on — the first *active* `exchanges[].slug` works
+  (`DE000BASF111.LSX` ✓). Observed failures for `DE000BASF111`:
+  - `.XETR` → `E` frame `{"errors":[{"errorCode":"FORBIDDEN",…,"meta":{"source":"MAPPER"}}]}` (XETR was in `exchangeIds` but rejected)
+  - `.lsx` (lowercase) → `JSON_PARSE_ERROR` … `meta.source: MAPPER`
+  - bare ISIN → `JSON_PARSE_ERROR`
+  → `rates`/`details`/enrichment must resolve the slug from the instrument
+  response, not hardcode an exchange. tr-cli's `DEFAULT_EXCHANGE=LSX` +
+  `exchangeIds[0]` pattern is correct.
+- `stockDetails`, `performance`, `instrumentSuitability`, `neonNews` all
+  answered on a real account via `tr-cli --json details <ISIN>` (6/6 topics).
+
+**CLI end-to-end on the real account (all verified 2026-08-15)**
+- `tr-cli --json rates DE000BASF111` → `{ok, quotes:[{instrumentId, name, price, ask}]}`
+- `tr-cli --json details DE000BASF111` → 6/6 topics
+- `tr-cli --json portfolio` → `{ok, positions[8] (enriched names + live prices), cash, totalValue}`
