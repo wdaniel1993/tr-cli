@@ -624,17 +624,41 @@ def history(
             positions_without_series=missing,
         )
 
-    # Union of all bar dates (trading days across positions).
-    all_dates = sorted({d for dates in bars_by_position.values() for d in dates})
+    # Series range: start at the LATEST first-bar date across positions so
+    # every series day covers ALL positions; dates = union of bar dates
+    # (trading days), filtered to the range.
+    first_dates = [min(dates) for dates in bars_by_position.values()]
+    series_start = max(first_dates)
+    all_dates = sorted(
+        d
+        for d in {d for dates in bars_by_position.values() for d in dates}
+        if d >= series_start
+    )
+
+    # Forward-fill per position: carry the last known close forward across
+    # gaps (thin trading / different market calendars). Nothing is filled
+    # BEFORE a position's first bar, so starting at `series_start` every day
+    # has a value for every position — no artificial drops from missing bars.
+    filled: dict[int, dict[str, Decimal]] = {}
+    for idx, dates in bars_by_position.items():
+        last_close: Decimal | None = None
+        fwd: dict[str, Decimal] = {}
+        for day in all_dates:
+            close = dates.get(day)
+            if close is not None:
+                last_close = close
+            if last_close is not None:
+                fwd[day] = last_close
+        filled[idx] = fwd
 
     cash_dec = cash.total if cash.items else Decimal(0)
     series: list[HistoryPoint] = []
     for day in all_dates:
         day_total = Decimal(0)
-        for idx, dates in bars_by_position.items():
-            close = dates.get(day)
+        for idx, fwd in filled.items():
+            close = fwd.get(day)
             if close is None:
-                continue  # missing bar -> position excluded that day
+                continue  # before this position's first bar (should not happen >= series_start)
             day_total += close * Decimal(positions[idx]["netSize"])
         day_total = (day_total + cash_dec).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
@@ -653,16 +677,11 @@ def history(
                 note += f"; series truncated server-side (oldest bar {series[0].date})"
         except (ValueError, TypeError):
             pass
-        # Coverage on the last day: positions without a bar that day are
-        # excluded (thin trading / different market calendars).
-        last_day = series[-1].date
-        covered_last = sum(
-            1 for dates in bars_by_position.values() if last_day in dates
+        # Forward-fill policy documentation (start = max first bar date).
+        note += (
+            f"; start = max first bar date ({series_start}) -> every day covers "
+            f"{len(bars_by_position)}/{len(bars_by_position)} positions (forward-filled)"
         )
-        if covered_last < len(bars_by_position):
-            note += (
-                f"; last point covers {covered_last}/{len(bars_by_position)} positions"
-            )
     return HistoryResult(
         series=series,
         start_date=series[0].date if series else None,

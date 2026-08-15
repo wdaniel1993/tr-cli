@@ -56,25 +56,39 @@ def test_history_dates_are_utc_days():
     assert len(dates) == 60  # mock generates one bar per calendar day
 
 
-def test_history_missing_bar_exclusion():
+def test_history_start_is_max_first_bar():
+    """Series starts at the latest first-bar date -> every day covers all positions."""
     m = _logged_in(days=100)
     m.missing_history_start = {"DE0005140008": 30}  # DB series starts 30 days in
     h = client.history(m, days=100)  # fallback window: no creation signals
     assert h.positions_covered == 2
-    assert len(h.series) == 100  # dates come from the union (Apple covers all)
-    # first 30 days: DB has no bar -> total = Apple only + cash
-    # day 0 Apple close = 100 + step, step = (232.05-100)/99
-    from decimal import ROUND_HALF_UP
+    # start = DB's first bar (30d in); no Apple-only prefix days
+    assert len(h.series) == 100 - 30
+    assert "start = max first bar date" in h.note
+    assert "forward-filled" in h.note
+    # day 0 already covers BOTH positions: Apple (forward-filled) + DB (first bar)
+    # -> total is far above Apple-only+cash, no artificial drop at the start
+    assert h.series[0].total > Decimal("2234.56") + Decimal(1000)
 
-    step = (Decimal("232.05") - Decimal(100)) / 99
-    apple_close0 = (Decimal(100) + step).quantize(Decimal("0.0001"))
-    expected0 = (apple_close0 * 10 + Decimal("2234.56")).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
-    )
-    assert h.series[0].total == expected0
-    # after DB joins, totals jump up (DB is in the money at first visible bar? no —
-    # DB starts at 100+ and falls; but the total still changes once DB is included)
-    assert h.series[29].total != h.series[30].total
+
+def test_history_forward_fill_no_drop_regression():
+    """Regression: a middle gap in one position must NOT drop the total."""
+    m = _logged_in(days=100)
+    # DB loses bars on indices 40..49 (middle of the 100-day series)
+    m.history_gaps = {"DE0005140008": {40, 41, 42, 43, 44, 45, 46, 47, 48, 49}}
+    h = client.history(m, days=100)
+    assert h.positions_covered == 2
+    assert len(h.series) == 100
+    # DB's close is forward-filled across the gap -> the total never collapses.
+    # (Without forward-fill, DB (~490 EUR) would vanish for 10 days.)
+    deltas = [
+        h.series[i].total - h.series[i - 1].total for i in range(1, len(h.series))
+    ]
+    assert min(deltas) >= Decimal("-0.01"), f"artificial drop in series: {min(deltas)}"
+    # day-over-day at the gap boundary stays smooth (normal daily move, no ~490 EUR cliff)
+    gap_start = 40
+    boundary_delta = abs(h.series[gap_start].total - h.series[gap_start - 1].total)
+    assert boundary_delta < Decimal(25), f"gap boundary jump: {boundary_delta}"
 
 
 def test_history_failed_series_excluded():
@@ -164,8 +178,11 @@ def test_history_cli_json_contract(cli_env):
         "days",
         "approximate",
         "note",
+        "coverage",
         "series",
     }
+    assert data["coverage"]["positions"] == 2
+    assert data["coverage"]["forward_filled"] is True
     # auto-detection wins over --days: CUSTOMER_CREATED is 150 days old in fixtures
     assert data["days"] == 150
     assert data["series"][0] == {

@@ -280,3 +280,17 @@ App version served: `2.2632.29` (index.js + HTML meta). TR_APP_VERSION default b
 - End-to-end: 2 WS connections per `tr-cli history` run (1 detection + 1
   rounds), 0 HTTP beyond account; zero 429s this session (5 WS total incl.
   probes, all spaced).
+
+### history — forward-fill bugfix (2026-08-15, v0.2.2)
+
+- **Bug**: naive per-day sum dropped positions lacking a bar that day →
+  artificial >2% drops (15 days in July 2026, -15.8% worst) with full
+  recovery next day. Per-position tradeAggregateHistory series have differing
+  date ranges/gaps (thin trading: e.g. Health Care 32 bars / 60 days, Stoxx
+  600 last bar 08-13).
+- **Fix**: per-position {date: close} map → **forward-fill** each position
+  (last known close carried forward; nothing filled before a position's first
+  bar) → series start = **max(first bar date)** so every day covers all
+  positions → sum qty×close + cash. JSON gains `coverage {positions,
+  forward_filled, start_rule}`; note documents the rule. Regression test:
+  synthetic middle gap must not drop the total.

@@ -410,6 +410,11 @@ def history(
         "days": len(result.series),
         "approximate": True,
         "note": result.note,
+        "coverage": {
+            "positions": result.positions_covered,
+            "forward_filled": True,
+            "start_rule": "max(first bar date)",
+        },
         "series": [
             {"date": p.date, "total": str(p.total), "cash": p.cash}
             for p in result.series

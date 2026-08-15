@@ -326,30 +326,39 @@ def _ytd_base_price(isin: str) -> float:
 
 
 def _history_bars(
-    base_price: float, last_price: float, num_bars: int, skip_days: int = 0
+    base_price: float,
+    last_price: float,
+    num_bars: int,
+    skip_days: int = 0,
+    gap_indices: set[int] | None = None,
 ) -> dict:
     """Daily bars ending today, linear from base_price to last_price.
 
     `skip_days` > 0 removes that many bars from the START of the series
     (simulates an instrument whose series begins later — missing-bar case).
+    `gap_indices` removes bars in the MIDDLE (simulates thin trading).
     """
     from datetime import datetime, timedelta
 
     today = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
-    n = num_bars - skip_days
-    step = (last_price - base_price) / max(n - 1, 1)
+    # Prices progress per VISIBLE bar (gaps don't cause price cliffs).
+    visible = [
+        i
+        for i in range(num_bars)
+        if i >= skip_days and not (gap_indices and i in gap_indices)
+    ]
+    n_visible = len(visible)
+    step = (last_price - base_price) / max(n_visible - 1, 1)
     aggregates = []
     start = today - timedelta(days=num_bars - 1)
-    for i in range(num_bars):
+    for v_idx, i in enumerate(visible):
         day = start + timedelta(days=i)
-        if i < skip_days:
-            continue
-        open_p = base_price + step * i
-        # close = next day's open; the LAST close is exactly last_price (realistic).
-        if i == num_bars - 1:
+        open_p = base_price + step * v_idx
+        # close = next visible bar's open; the LAST close is exactly last_price.
+        if v_idx == n_visible - 1:
             close_p = last_price
         else:
-            close_p = base_price + step * (i + 1)
+            close_p = base_price + step * (v_idx + 1)
         aggregates.append(
             {
                 "time": int(day.timestamp() * 1000),
@@ -395,6 +404,8 @@ class MockTransport(Transport):
         self.timeline_hide_creation: bool = (
             os.environ.get("TR_CLI_MOCK_HIDE_CREATION", "0") == "1"
         )  # drop creation/deposit signals for fallback tests
+        # middle-gap simulation: isin -> set of bar indices to drop
+        self.history_gaps: dict[str, set[int]] = {}
 
     # --- HTTP ---------------------------------------------------------------
     def request(
@@ -632,6 +643,7 @@ class MockTransport(Transport):
                             break
                     if last_price is not None and isin not in self.fail_history_isins:
                         skip = self.missing_history_start.get(isin, 0)
+                        gaps = self.history_gaps.get(isin)
                         frm = payload.get("from")
                         until = payload.get("until")
                         if frm and until:
@@ -643,6 +655,7 @@ class MockTransport(Transport):
                             last_price,
                             num_bars=num_bars,
                             skip_days=skip,
+                            gap_indices=gaps,
                         )
             results[r_index] = collected
         return results
