@@ -105,3 +105,66 @@ def test_details_json(cli_env):
     assert r.exit_code == 0
     data = json.loads(r.output)
     assert data["topics"]["instrument"]["shortName"] == "Apple"
+
+
+def test_timeline_command(cli_env):
+    r = run("login")
+    assert r.exit_code == 0
+    r = run("timeline")
+    assert r.exit_code == 0, r.output
+    assert "TIMELINE" in r.output
+    assert "dividends" in r.output
+    assert "deposits" in r.output
+    assert "-184.40 EUR" in r.output  # dividend amount
+    assert "+600.00 EUR" in r.output  # incoming transfer
+    assert "BUCKET SUMS" in r.output
+
+
+def test_timeline_json(cli_env):
+    r = run("login")
+    assert r.exit_code == 0
+    r = run("--json", "timeline")
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["ok"] is True
+    assert data["window_days"] == 90
+    types = {e["eventType"] for e in data["events"]}
+    assert "SSP_CORPORATE_ACTION_DIVIDEND_EQUIVALENT" in types  # transactions stream
+    assert "EX_POST_COST_REPORT_CREATED" in types  # activity-log stream
+    amt_events = [e for e in data["events"] if e["amount"]]
+    assert amt_events and amt_events[0]["amount"]["currency"] == "EUR"
+    assert data["buckets"]["dividends"]["sum"] == {"EUR": "-184.4"}
+
+
+def test_timeline_bucket_filter(cli_env):
+    r = run("login")
+    assert r.exit_code == 0
+    r = run("timeline", "--bucket", "dividends")
+    assert r.exit_code == 0, r.output
+    assert "dividends" in r.output
+    assert "BANK_TRANSACTION_INCOMING" not in r.output
+    r = run("timeline", "--bucket", "bogus")
+    assert r.exit_code == 2
+
+
+def test_portfolio_ytd_json(cli_env):
+    r = run("login")
+    assert r.exit_code == 0
+    r = run("--json", "portfolio")
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["ytdTotal"] == "902.70"
+    pos = data["positions"][0]
+    assert pos["ytd"]["basePrice"] == "100.0"
+    assert "gain" in pos["ytd"] and "pct" in pos["ytd"]
+    # backward compat: old fields still present
+    assert data["totalValue"] == "2402.70"
+    assert len(data["positions"]) == 2
+
+
+def test_portfolio_human_ytd_line(cli_env):
+    r = run("login")
+    assert r.exit_code == 0
+    r = run("portfolio")
+    assert r.exit_code == 0, r.output
+    assert "YTD 2026" in r.output

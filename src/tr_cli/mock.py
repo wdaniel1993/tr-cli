@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Hashable
+from datetime import UTC
 from typing import Any
 
 from .transport import HttpResponse, Transport
@@ -134,6 +135,196 @@ FIXTURE_NEWS = [
     }
 ]
 
+
+# --- timeline fixtures (dynamic timestamps; pages of 5 to exercise pagination) ---
+
+
+def _ts(days_ago: float, hour: int = 9) -> str:
+    from datetime import datetime, timedelta
+
+    dt = datetime.now(UTC) - timedelta(days=days_ago)
+    dt = dt.replace(hour=hour % 24, minute=5, second=5, microsecond=920000)
+    return dt.isoformat().replace("+00:00", "+0000")
+
+
+def _timeline_tx_items() -> list[dict]:
+    return [
+        {
+            "id": "tx-01",
+            "timestamp": _ts(0.5),
+            "title": "Core MSCI EM IMI USD (Acc)",
+            "eventType": "SSP_CORPORATE_ACTION_DIVIDEND_EQUIVALENT",
+            "amount": {"currency": "EUR", "value": -184.4, "fractionDigits": 2},
+            "status": "EXECUTED",
+        },
+        {
+            "id": "tx-02",
+            "timestamp": _ts(2),
+            "title": "Wallner  Daniel",
+            "eventType": "BANK_TRANSACTION_INCOMING",
+            "amount": {"currency": "EUR", "value": 600.0, "fractionDigits": 2},
+            "status": "EXECUTED",
+        },
+        {
+            "id": "tx-03",
+            "timestamp": _ts(4),
+            "title": "Interest",
+            "eventType": "INTEREST_PAYOUT",
+            "amount": {"currency": "EUR", "value": 7.63, "fractionDigits": 2},
+            "status": "EXECUTED",
+        },
+        {
+            "id": "tx-04",
+            "timestamp": _ts(6),
+            "title": "MSCI World USD (Acc)",
+            "eventType": "TRADING_SAVINGSPLAN_EXECUTED",
+            "amount": {"currency": "EUR", "value": -150.0, "fractionDigits": 2},
+            "status": "EXECUTED",
+        },
+        {
+            "id": "tx-05",
+            "timestamp": _ts(8),
+            "title": "Core S&P 500 USD (Acc)",
+            "eventType": "TRADING_SAVINGSPLAN_EXECUTED",
+            "amount": {"currency": "EUR", "value": -50.0, "fractionDigits": 2},
+            "status": "EXECUTED",
+        },
+        # page 2 (older)
+        {
+            "id": "tx-06",
+            "timestamp": _ts(10),
+            "title": "Wallner  Daniel",
+            "eventType": "BANK_TRANSACTION_OUTGOING",
+            "amount": {"currency": "EUR", "value": -2000.0, "fractionDigits": 2},
+            "status": "EXECUTED",
+        },
+        {
+            "id": "tx-07",
+            "timestamp": _ts(12),
+            "title": "Daniel Wallner",
+            "eventType": "BANK_TRANSACTION_INCOMING",
+            "amount": {"currency": "EUR", "value": 5000.0, "fractionDigits": 2},
+            "status": "EXECUTED",
+        },
+        {
+            "id": "tx-08",
+            "timestamp": _ts(14),
+            "title": "Physical Gold USD (Acc)",
+            "eventType": "TRADING_SAVINGSPLAN_EXECUTED",
+            "amount": {"currency": "EUR", "value": -50.0, "fractionDigits": 2},
+            "status": "EXECUTED",
+        },
+        {
+            "id": "tx-09",
+            "timestamp": _ts(40),
+            "title": "Interest",
+            "eventType": "INTEREST_PAYOUT",
+            "amount": {"currency": "EUR", "value": 1.02, "fractionDigits": 2},
+            "status": "EXECUTED",
+        },
+        {
+            "id": "tx-10",
+            "timestamp": _ts(120),
+            "title": "Wallner  Daniel",
+            "eventType": "BANK_TRANSACTION_INCOMING",
+            "amount": {"currency": "EUR", "value": 300.0, "fractionDigits": 2},
+            "status": "EXECUTED",
+        },
+    ]
+
+
+def _timeline_log_items() -> list[dict]:
+    return [
+        {
+            "id": "log-01",
+            "timestamp": _ts(1),
+            "title": "Ex-post cost report",
+            "eventType": "EX_POST_COST_REPORT_CREATED",
+            "icon": "logos/bank_traderepublic/v2",
+        },
+        {
+            "id": "log-02",
+            "timestamp": _ts(3),
+            "title": "Annual Tax Report 2025",
+            "eventType": "TAX_YEAR_END_REPORT_CREATED",
+        },
+        {
+            "id": "log-03",
+            "timestamp": _ts(5),
+            "title": "FTSE All-World High Dividend Yield USD (Acc)",
+            "eventType": "SSP_CORPORATE_ACTION_INFORMATIVE",
+            "subtitle": "Change",
+        },
+        {
+            "id": "log-04",
+            "timestamp": _ts(7),
+            "title": "Mystery event",
+            "eventType": "SOME_UNKNOWN_EVENT_TYPE",
+        },
+        {
+            "id": "log-05",
+            "timestamp": _ts(9),
+            "title": "Legal Documents",
+            "subtitle": "Accepted",
+            "eventType": "DOCUMENTS_ACCEPTED",
+        },
+        # page 2
+        {
+            "id": "log-06",
+            "timestamp": _ts(11),
+            "title": "Order rejected",
+            "eventType": "ORDER_REJECTED",
+        },
+        {
+            "id": "log-07",
+            "timestamp": _ts(60),
+            "title": "Quarterly Report",
+            "eventType": "QUARTERLY_REPORT",
+        },
+        {
+            "id": "log-08",
+            "timestamp": _ts(150),
+            "title": "Customer created",
+            "eventType": "CUSTOMER_CREATED",
+        },
+    ]
+
+
+TIMELINE_PAGE_SIZE = 5
+
+
+# --- tradeAggregateHistory fixtures (daily bars from 2026-01-01) ---
+
+
+def _ytd_bars(isin: str, base_price: float, last_price: float) -> dict:
+    """Daily bars: first bar open = base_price (year start), last close = last_price."""
+    n = 160  # trading days Jan->Aug
+    step = (last_price - base_price) / max(n - 1, 1)
+    aggregates = []
+    from datetime import datetime, timedelta
+
+    start = datetime(2026, 1, 2, tzinfo=UTC)
+    for i in range(n):
+        open_p = base_price + step * i
+        close_p = open_p + step * 0.5
+        day = start + timedelta(days=i)
+        aggregates.append(
+            {
+                "time": int(day.timestamp() * 1000),
+                "open": round(open_p, 4),
+                "close": round(close_p, 4),
+                "high": round(max(open_p, close_p) * 1.001, 4),
+                "low": round(min(open_p, close_p) * 0.999, 4),
+                "volume": 100,
+            }
+        )
+    return {"aggregates": aggregates}
+
+
+def _ytd_base_price(isin: str) -> float:
+    return 100.0
+
+
 LOGIN_429_BODY = (
     '{"errors":[{"errorCode":"TOO_MANY_REQUESTS",'
     '"meta":{"nextAttemptInSeconds":600,"nextAttemptTimestamp":"2030-01-01T00:00:00.000Z"}}]}'
@@ -247,6 +438,17 @@ class MockTransport(Transport):
                     and ticker_id in FIXTURE_TICKERS
                 ):
                     results[key] = dict(FIXTURE_TICKERS[ticker_id])
+            elif topic == "tradeAggregateHistory":
+                isin = payload.get("isin", "")
+                # base price = fixture year-start; last close = current ticker last price
+                base = _ytd_base_price(isin)
+                last_price = None
+                for tkey, tval in FIXTURE_TICKERS.items():
+                    if tkey.split(".")[0] == isin:
+                        last_price = float(tval["last"]["price"])
+                        break
+                if last_price is not None:
+                    results[key] = _ytd_bars(isin, base, last_price)
             elif topic == "stockDetails":
                 isin = payload.get("id", "")
                 if isin in FIXTURE_STOCK_DETAILS:
@@ -258,6 +460,62 @@ class MockTransport(Transport):
             elif topic == "neonNews":
                 results[key] = list(FIXTURE_NEWS)
             # unknown topics: no response (mimics timeout/missing)
+        return results
+
+    def ws_paginate(
+        self,
+        subscriptions: list[tuple[Hashable, dict[str, Any]]],
+        *,
+        next_payload: Any,
+        timeout: float = 8.0,
+        max_rounds: int = 25,
+    ) -> dict[Hashable, list[Any]]:
+        """Scripted multi-round pagination over the fixture item lists."""
+        pages: dict[Hashable, list[list[dict]]] = {}
+        for key, payload in subscriptions:
+            topic = payload.get("type")
+            if topic == "timelineTransactions":
+                items = _timeline_tx_items()
+            elif topic == "timelineActivityLog":
+                items = _timeline_log_items()
+            else:
+                items = []
+            pages[key] = [
+                items[i : i + TIMELINE_PAGE_SIZE]
+                for i in range(0, len(items), TIMELINE_PAGE_SIZE)
+            ]
+
+        results: dict[Hashable, list[Any]] = {key: [] for key, _ in subscriptions}
+        active = list(subscriptions)
+        for _round in range(max_rounds):
+            if not active:
+                break
+            round_results: dict[Hashable, Any] = {}
+            for key, _payload in active:
+                queue = pages.get(key) or []
+                if not queue:
+                    continue
+                page_items = queue.pop(0)
+                more = bool(queue)
+                import base64 as _b64
+
+                after = (
+                    _b64.b64encode(str(len(queue) + 1).encode()).decode()
+                    if more
+                    else None
+                )
+                round_results[key] = {
+                    "items": page_items,
+                    "cursors": {"after": after, "before": None},
+                }
+            next_active: list[tuple[Hashable, dict[str, Any]]] = []
+            for key, _payload in active:
+                if key in round_results:
+                    results[key].append(round_results[key])
+                    nxt = next_payload(key, round_results[key])
+                    if nxt is not None:
+                        next_active.append((key, nxt))
+            active = next_active
         return results
 
     def cookies_snapshot(self) -> dict[str, str]:

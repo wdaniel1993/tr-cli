@@ -58,6 +58,10 @@ def render_portfolio(portfolio: Portfolio) -> str:
         lines.append("CASH: (none)")
     lines.append("")
     lines.append(f"TOTAL VALUE (positions only): {portfolio.total_value}")
+    if portfolio.ytd_total is not None:
+        lines.append(
+            f"YTD 2026 (positions, first-trading-day base): {portfolio.ytd_total}"
+        )
     return "\n".join(lines)
 
 
@@ -179,4 +183,49 @@ def render_details(isin: str, topics: dict[str, Any]) -> str:
     if missing:
         lines.append("")
         lines.append(f"No data for topics: {', '.join(missing)}")
+    return "\n".join(lines)
+
+
+def render_timeline(result, *, days: int = 90, bucket: str | None = None) -> str:
+    """Human rendering for the timeline command."""
+
+    lines: list[str] = []
+    title = f"TIMELINE (last {days} days)"
+    if bucket:
+        title += f", bucket: {bucket}"
+    lines.append(title)
+    if not result.events:
+        lines.append("(no events)")
+    for ev in result.events:
+        amount = ""
+        if ev.amount:
+            currency = ev.amount.get("currency") or "?"
+            try:
+                value = float(ev.amount.get("value"))
+                amount = f"  {value:+,.2f} {currency}"
+            except (TypeError, ValueError):
+                amount = f"  {ev.amount}"
+        ts = ev.timestamp[:10] if ev.timestamp else "?"
+        lines.append(f"{ts}  [{ev.bucket:<16}] {amount}  {ev.title}")
+    lines.append("")
+    lines.append("BUCKET SUMS")
+    any_sums = False
+    for b in (
+        "deposits",
+        "withdrawals",
+        "interest",
+        "dividends",
+        "orders",
+        "corporate_actions",
+        "documents",
+        "other",
+    ):
+        s = result.buckets[b]
+        if s.count == 0:
+            continue
+        sums = ", ".join(f"{v:+,.2f} {c}" for c, v in s.sums.items())
+        lines.append(f"  {b:<16} n={s.count:<3} {sums}")
+        any_sums = True
+    if not any_sums:
+        lines.append("  (no events in window)")
     return "\n".join(lines)

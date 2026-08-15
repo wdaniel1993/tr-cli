@@ -15,10 +15,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import UTC
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from .errors import NeedsLogin, ProtocolError
+from .protocol import (
+    RESOLUTION_1D_MS,
+    TRADE_AGGREGATE_HISTORY_TOPIC,
+    year_start_millis,
+)
 from .transport import Transport
 
 BOND_PATTERN = re.compile(
@@ -45,6 +51,11 @@ class Position:
     average_buy_in: str = "0"
     price: str | None = None
     ask: str | None = None
+    # YTD (2026): base price = first daily bar open of the year (first trading
+    # day — NOT midnight Jan 1; honest approximation), gain = (price − base) × netSize.
+    ytd_base_price: str | None = None
+    ytd_gain: Decimal | None = None
+    ytd_pct: Decimal | None = None
 
     @property
     def net_value(self) -> Decimal | None:
@@ -113,6 +124,16 @@ class CashBalance:
 class Portfolio:
     positions: list[Position] = field(default_factory=list)
     cash: CashBalance = field(default_factory=CashBalance)
+
+    @property
+    def ytd_total(self) -> Decimal | None:
+        """Sum of per-position YTD gains where a series was available (null when none)."""
+        gains = [p.ytd_gain for p in self.positions if p.ytd_gain is not None]
+        if not gains:
+            return None
+        return sum(gains, Decimal(0)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
 
     @property
     def total_value(self) -> Decimal:
@@ -246,6 +267,51 @@ def _enrich(transport: Transport, items: list[dict[str, Any]], timeout: float) -
                 items[idx]["ask"] = str(ask["price"])
 
 
+def _fetch_ytd(
+    transport: Transport, items: list[dict[str, Any]], *, timeout: float = 6.0
+) -> None:
+    """Populate items[idx]['ytdBasePrice'] from tradeAggregateHistory daily bars.
+
+    The year-start base price is the FIRST bar's `open` — the first trading
+    day of the year (markets are closed Jan 1), not midnight Jan 1. This is
+    the best available YTD base; positions without a series keep null.
+    """
+    from datetime import datetime
+
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    subs: list[tuple[int, dict[str, Any]]] = []
+    for idx, it in enumerate(items):
+        ex = (it.get("exchangeIds") or [None])[0]
+        if not ex:
+            continue
+        subs.append(
+            (
+                idx,
+                {
+                    "type": TRADE_AGGREGATE_HISTORY_TOPIC,
+                    "isin": it["instrumentId"],
+                    "exchangeId": ex,
+                    "resolution": RESOLUTION_1D_MS,
+                    "from": year_start_millis(),
+                    "until": now_ms,
+                },
+            )
+        )
+    if not subs:
+        return
+    series = transport.ws_collect(subs, timeout=timeout)
+    for idx, resp in series.items():
+        if not isinstance(resp, dict):
+            continue
+        aggregates = resp.get("aggregates") or []
+        if not aggregates or not isinstance(aggregates[0], dict):
+            continue
+        base = aggregates[0].get("open")
+        if base is None:
+            continue
+        items[idx]["ytdBasePrice"] = str(base)
+
+
 def portfolio(transport: Transport, *, timeout: float = 5.0) -> Portfolio:
     """Portfolio positions + cash.
 
@@ -285,10 +351,25 @@ def portfolio(transport: Transport, *, timeout: float = 5.0) -> Portfolio:
     ]
     items = [{"instrumentId": p.instrument_id} for p in positions]
     _enrich(transport, items, timeout=timeout)
+    _fetch_ytd(transport, items, timeout=timeout)
     for pos, item in zip(positions, items):
         pos.name = item.get("name", "")
         pos.price = item.get("price")
         pos.ask = item.get("ask")
+        base = item.get("ytdBasePrice")
+        if base is not None and pos.price is not None:
+            try:
+                base_dec = Decimal(base)
+                pos.ytd_base_price = str(base_dec)
+                pos.ytd_gain = (
+                    (Decimal(pos.price) - base_dec) * Decimal(pos.net_size)
+                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                if base_dec != 0:
+                    pos.ytd_pct = (
+                        (Decimal(pos.price) - base_dec) / base_dec * 100
+                    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            except (ValueError, TypeError, ArithmeticError):
+                pass
     return Portfolio(positions=positions, cash=cash)
 
 

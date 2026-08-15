@@ -28,7 +28,9 @@ APP_ORIGIN = os.environ.get("TR_APP_ORIGIN", "https://app.traderepublic.com")
 WS_URL = os.environ.get("TR_WS_URL", "wss://api.traderepublic.com")
 
 # Header values (env-overridable; pytr defaults).
-TR_APP_VERSION = os.environ.get("TR_APP_VERSION", "2.2631.13")
+TR_APP_VERSION = os.environ.get(
+    "TR_APP_VERSION", "2.2632.29"
+)  # current web bundle (verified 2026-08-15)
 TR_PLATFORM = os.environ.get("TR_PLATFORM", "web-pro")
 USER_AGENT = os.environ.get(
     "TR_USER_AGENT",
@@ -61,6 +63,46 @@ USEFUL_COOKIES = frozenset(
 LOGIN_ENDPOINT = "/api/v2/auth/web/login"
 SESSION_ENDPOINT = "/api/v1/auth/web/session"
 ACCOUNT_ENDPOINT = "/api/v2/auth/account"
+
+# REST timeline endpoints (web app bundle v2.2632.29; WS topics preferred by tr-cli).
+TIMELINE_REST = "/api/v2/timeline"
+TIMELINE_REST_TRANSACTIONS = TIMELINE_REST + "/transactions"
+TIMELINE_REST_ACTIVITY_LOG = TIMELINE_REST + "/activity-log"
+# REST portfolio chart — the portfolioAggregateHistory replacement (bundle v2.2632.29).
+PORTFOLIO_CHART_ENDPOINT = "/api-gateway/portfolio-chart/v2/chart"
+
+# Timeline WS topics.
+TIMELINE_TRANSACTIONS_TOPIC = "timelineTransactions"
+TIMELINE_ACTIVITY_LOG_TOPIC = "timelineActivityLog"
+TIMELINE_PAGE_LIMIT = 50  # server caps pages around 30-50 items
+TIMELINE_DEFAULT_DAYS = 90
+
+# YTD / chart series.
+TRADE_AGGREGATE_HISTORY_TOPIC = "tradeAggregateHistory"
+AGGREGATE_HISTORY_LIGHT_V2_TOPIC = "aggregateHistoryLightV2"
+# resolution values accepted by tradeAggregateHistory (bundle v2.2632.29):
+# 86400000 = 1 day, 604800000 = 1 week.
+RESOLUTION_1D_MS = 86400000
+RESOLUTION_1W_MS = 604800000
+# Chart range enum values (bundle chart-wk88ev3O.js).
+CHART_RANGE = {
+    "1d": "1d",
+    "5d": "5d",
+    "1m": "1m",
+    "3m": "3m",
+    "6m": "6m",
+    "1y": "1y",
+    "3y": "3y",
+    "5y": "5y",
+    "max": "max",
+}
+
+
+def year_start_millis(year: int = 2026) -> int:
+    """UTC millis for Jan 1 00:00 of the given year."""
+    from datetime import datetime
+
+    return int(datetime(year, 1, 1, tzinfo=UTC).timestamp() * 1000)
 
 
 def _timezone_name() -> str:

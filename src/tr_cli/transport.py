@@ -73,6 +73,22 @@ class Transport(ABC):
         Returns {key: parsed_payload} for received responses only.
         """
 
+    @abstractmethod
+    def ws_paginate(
+        self,
+        subscriptions: list[tuple[Hashable, dict[str, Any]]],
+        *,
+        next_payload: Any,
+        timeout: float = 8.0,
+        max_rounds: int = 25,
+    ) -> dict[Hashable, list[Any]]:
+        """Multi-round subscribe->collect over ONE WS connection.
+
+        Round 1 subscribes to all (key, payload) pairs; after each round
+        `next_payload(key, last_payload)` returns the next round's payload or
+        None to stop. Returns {key: [round_1, round_2, ...]}.
+        """
+
     def cookies_snapshot(self) -> dict[str, str]:
         """Current cookie set (used after login to persist the session)."""
         return {}
@@ -146,6 +162,25 @@ class RealTransport(Transport):
         cookie_str = "; ".join(f"{k}={v}" for k, v in self.cookies_snapshot().items())
         return ws_mod.collect(
             self, subscriptions, cookie_str=cookie_str, timeout=timeout
+        )
+
+    def ws_paginate(
+        self,
+        subscriptions: list[tuple[Hashable, dict[str, Any]]],
+        *,
+        next_payload: Any,
+        timeout: float = 8.0,
+        max_rounds: int = 25,
+    ) -> dict[Hashable, list[Any]]:
+        if not subscriptions:
+            return {}
+        cookie_str = "; ".join(f"{k}={v}" for k, v in self.cookies_snapshot().items())
+        return ws_mod.paginate(
+            subscriptions,
+            cookie_str=cookie_str,
+            next_payload=next_payload,
+            timeout=timeout,
+            max_rounds=max_rounds,
         )
 
 

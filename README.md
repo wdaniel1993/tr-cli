@@ -20,10 +20,33 @@ uv run tr-cli --help
 tr-cli login                # v2 push flow: approve the prompt in the TR mobile app
 tr-cli session status       # local check of the saved session (no network)
 tr-cli session refresh      # rotate session cookies via /api/v1/auth/web/session
-tr-cli portfolio            # positions + cash + totals
+tr-cli portfolio            # positions + cash + totals + YTD
+tr-cli timeline             # merged event feed (transactions + activity log), ~90 days
+tr-cli timeline --bucket dividends
 tr-cli rates DE0005140008 US0378331005
 tr-cli details US0378331005
 ```
+
+### Timeline
+
+`tr-cli timeline` merges the two streams the app itself merges:
+- `timelineTransactions` — money events (dividends, transfers, interest,
+  savings-plan buys), each with a signed `amount {currency, value, fractionDigits}`
+  (positive = inflow, negative = outflow/buy/reinvestment).
+- `timelineActivityLog` — reports, corporate actions, document/account events (no amounts).
+
+Events are paginated via the `after` cursor back to `--days` (default 90),
+deduplicated by id, and classified into `deposits | withdrawals | interest |
+dividends | orders | corporate_actions | documents | other`. `--json` gives the
+raw events plus per-bucket sums.
+
+### YTD (portfolio)
+
+`tr-cli portfolio` includes per-position YTD (JSON: `position.ytd`, top-level
+`ytdTotal`). The year-start base price is the **first trading day's open** from
+the daily `tradeAggregateHistory` series (markets are closed Jan 1 — this is an
+honest approximation, not midnight-Jan-1 precision). Positions without a series
+get `null`; the CLI never substitutes `price_6m` or other proxies.
 
 ### Output semantics (verified against the real app, 2026-08-15)
 

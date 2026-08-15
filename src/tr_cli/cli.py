@@ -244,6 +244,15 @@ def portfolio() -> None:
                 "price": p.price,
                 "ask": p.ask,
                 "netValue": str(p.net_value) if p.net_value is not None else None,
+                "ytd": (
+                    {
+                        "basePrice": p.ytd_base_price,
+                        "gain": str(p.ytd_gain) if p.ytd_gain is not None else None,
+                        "pct": str(p.ytd_pct) if p.ytd_pct is not None else None,
+                    }
+                    if p.ytd_base_price is not None
+                    else None
+                ),
             }
             for p in result.positions
         ],
@@ -255,6 +264,10 @@ def portfolio() -> None:
             "total": str(result.cash.total),
         },
         "totalValue": str(result.total_value),
+        "ytdTotal": str(result.ytd_total) if result.ytd_total is not None else None,
+        "positions_ytd": {
+            "base": "first trading day open of 2026 (tradeAggregateHistory daily bars)",
+        },
     }
     _emit(data, _ctx_json(), render_mod.render_portfolio(result))
 
@@ -301,6 +314,59 @@ def _usage(msg: str) -> TrCliError:
     from .errors import UsageError
 
     return UsageError(msg)
+
+
+@app.command()
+def timeline(
+    days: int = typer.Option(90, "--days", help="How far back to fetch (default 90)."),
+    bucket: str | None = typer.Option(
+        None, "--bucket", help="Only show one bucket (e.g. dividends)."
+    ),
+) -> None:
+    """Show the account's timeline (transactions + activity log, merged)."""
+    mock = _ctx_mock()
+    base_dir = _ctx_base_dir()
+    try:
+        transport = _session_transport(mock, base_dir)
+        from .timeline import BUCKETS, fetch_timeline
+
+        if bucket is not None and bucket not in BUCKETS:
+            _fail(
+                _usage(f"Invalid --bucket {bucket!r}; choose from {', '.join(BUCKETS)}")
+            )
+        result = fetch_timeline(transport, days=days)
+    except TrCliError as e:
+        _fail(e)
+    if bucket is not None:
+        result.events = [e for e in result.events if e.bucket == bucket]
+    data = {
+        "ok": True,
+        "window_days": days,
+        "pages": result.pages,
+        "events": [
+            {
+                "id": e.id,
+                "timestamp": e.timestamp,
+                "title": e.title,
+                "subtitle": e.subtitle,
+                "eventType": e.event_type,
+                "bucket": e.bucket,
+                "amount": e.amount,
+            }
+            for e in result.events
+        ],
+        "buckets": {
+            b: {
+                "count": s.count,
+                "sum": {c: str(v) for c, v in s.sums.items()},
+            }
+            for b, s in result.buckets.items()
+        },
+    }
+    if _ctx_json():
+        print(json.dumps(data, indent=2))
+    else:
+        print(render_mod.render_timeline(result, days=days, bucket=bucket))
 
 
 @app.command()

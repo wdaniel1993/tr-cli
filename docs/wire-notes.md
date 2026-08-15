@@ -179,3 +179,62 @@ re-runnable with a logged-in session). Spacing: 1 login + 2 HTTP GETs +
 - Session refresh on an older session DID rotate `JSESSIONID` + `tr_session`
   (the spike record above noted no rotation on a fresh session — rotation
   happens near TTL expiry).
+
+### Web bundle v2.2632.29 — timeline & chart findings (2026-08-15, passive GETs)
+
+App version served: `2.2632.29` (index.js + HTML meta). TR_APP_VERSION default bumped to match.
+
+**Timeline — two streams, REST + WS both exist:**
+- REST (web app): `GET /api/v2/timeline/transactions`, `/activity-log`,
+  `/inbox/open`, `/inbox/closed`, `/actions`, `/search`, `/detail/showcase`.
+  Feed = inbox/open + inbox/closed merged, deduped by id; paginate with
+  `cursor`/`olderThan` (values are base64 keysets; `cursors.after` for next page).
+- WS (used by tr-cli): `timelineTransactions` = money events with
+  `amount {currency, value, fractionDigits}` (BANK_TRANSACTION_INCOMING/
+  OUTGOING, INTEREST_PAYOUT, TRADING_SAVINGSPLAN_EXECUTED,
+  SSP_CORPORATE_ACTION_DIVIDEND_EQUIVALENT, ...); `timelineActivityLog` =
+  reports/corporate actions/docs (EX_POST_COST_REPORT_CREATED,
+  TAX_YEAR_END_REPORT_CREATED, DOCUMENTS_ACCEPTED, ORDER_REJECTED,
+  SSP_CORPORATE_ACTION_INFORMATIVE/ACTIVITY, ...). Subscribe args:
+  `{type, limit}` and `{type, limit, after: <cursors.after>}` for pages.
+- **The app's feed merges both** — that is why activityLog alone missed the
+  dividend/transfer/interest events (they live in timelineTransactions).
+
+**Chart series (portfolioAggregateHistory replacement):**
+- Portfolio chart is REST: `GET api-gateway/portfolio-chart/v2/chart
+  ?secAccNo=<secAccNo>&range=<1d|5d|1m|3m|6m|1y|3y|5y|max>&currency=EUR
+  [&instrumentCategories=...]` -> `{points:[{timestamp, netValue,
+  performance{absoluteValue, relativeValue}}], openingTime, expectedClosingTime}`.
+- Instrument chart (stocks/ETFs) is WS `tradeAggregateHistory` (protobuf-backed
+  service `TradeAggregateHistory.V2`, but the WS mapper accepts JSON):
+  `{"type":"tradeAggregateHistory","isin":"...","exchangeId":"<active slug>",
+  "resolution":86400000|604800000,"from":<ms>,"until":<ms>}`
+  -> `{aggregates:[{time, open, close, high, low, volume}]}`.
+  ⚠️ Field names are top-level `isin/exchangeId/resolution/from/until` — the
+  protobuf names (`instrument_id`, `resolution_millis`, `from_millis`) are
+  REJECTED by the mapper (JSON_PARSE_ERROR), verified by probe.
+- Crypto chart: WS `aggregateHistoryLightV2`
+  `{"type":"aggregateHistoryLightV2","isin":"...","exchangeId":"...",
+  "unit":"EUR","range":"1y","resolution":86400000}`.
+- YTD basis: first daily bar `open` of the year (first trading day — Jan 1 is a
+  market holiday). `performance` topic's `price_6m`/`price_1y` are NOT Jan-1 prices.
+- `technical.deltaOpenPricePctYTD` exists in the pro-trading heatmap config but is
+  not part of the consumer account data path.
+
+**Other:** `YieldToMaturity` REST endpoint for bonds:
+`api-gateway/quotes-api/v1/instruments/{isin}.{exchange}/ytm/aggregateHistory?range=...`.
+
+### timeline + YTD — live verification (2026-08-15, spaced)
+
+- `tr-cli --json timeline --days 60` → 24 events, 1 page: 3 deposits (+600, +5000,
+  +600), 1 withdrawal (−2000), 2 interest (+7.63, +0.85), 3 dividends
+  (SSP_CORPORATE_ACTION_DIVIDEND_EQUIVALENT, incl. −184.40 on 2026-08-13 —
+  matches Daniel's app feed), 12 savings-plan buys, 1 corporate action,
+  2 documents. Classification + amounts verified.
+- `tr-cli --json portfolio` → `tradeAggregateHistory` daily bars WORK with the
+  bundle-derived payload (`isin`, `exchangeId`, `resolution: 86400000`, `from`,
+  `until` at top level). All 8 positions got ytd (base = first 2026 bar open,
+  e.g. EM IMI 38.912 → 47.116 = +21.08%); ytdTotal +23128.51. Cash EUR 3552.53
+  and totalValue 182961.06 unchanged.
+- WS budget this session: 7 connections total (3 research probes + 4 verification),
+  all spaced, zero 429s.
