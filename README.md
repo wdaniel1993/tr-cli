@@ -42,15 +42,17 @@ very long windows are truncated with a note.
 
 For each day, `total` = Σ (qty × close) over positions, **forward-filled per
 position** (each position's last known close is carried across gaps from thin
-trading or differing market calendars — never summed with fewer positions),
-plus the **current cash** (constant). The series starts at the **latest first
-bar date across positions** so every day covers ALL positions (no artificial
-drops); the JSON `coverage` object and the note document this. Positions bought
-mid-window appear across their whole price history and cash is held at today's
-value — hence `approximate: true`. `--json` contract for scripts: `{ok, start_date, end_date,
-days, approximate, note, series: [{date, total, cash|null}]}`. Human output is
-a compact date/total/Δ table. Note: `history` totals include cash;
-`portfolio.totalValue` does not.
+trading or differing market calendars — never summed with fewer positions).
+`total` is **positions only** — matching `portfolio.totalValue` and the TR app —
+and the per-point `cash` field carries the constant current cash separately for
+the chart's cash line (never added to `total`). The series starts at the
+**latest first bar date across positions** so every day covers ALL positions
+(no artificial drops); the JSON `coverage` object and the note document this.
+Positions bought mid-window appear across their whole price history — hence
+`approximate: true`. `--json` contract for scripts: `{ok, start_date, end_date,
+days, approximate, note, coverage, series: [{date, total, cash|null}]}`. Human
+output is a compact date/total/Δ table. `history` totals are positions-only and
+merge with `portfolio.totalValue` (cash excluded in both).
 
 ### Timeline
 

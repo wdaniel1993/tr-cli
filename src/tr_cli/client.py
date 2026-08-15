@@ -30,7 +30,9 @@ from .transport import Transport
 
 HISTORY_DEFAULT_DAYS = 90  # fallback when no account-start signal is detectable
 HISTORY_MAX_DAYS = 730
-HISTORY_NOTE = "current quantities applied retroactively; cash constant"
+HISTORY_NOTE = (
+    "current quantities applied retroactively; cash reported separately (constant)"
+)
 
 BOND_PATTERN = re.compile(
     r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|"
@@ -448,9 +450,11 @@ def history(
       3. fallback: now − `days` (default 90) when no signal is found.
 
     ONE WS connection, three sequential rounds (portfolio+cash → instruments →
-    daily bars). Per date: total = Σ (qty × close) over positions that HAVE a
-    bar that day, plus the CURRENT cash (constant — documented approximation).
-    Positions whose series fetch fails are excluded from the whole curve.
+    daily bars). Per date: total = Σ (qty × close) over positions
+    (forward-filled) — POSITIONS ONLY, matching `portfolio.totalValue`
+    semantics; the current cash is reported separately as a constant per-point
+    `cash` field and is NEVER added into `total`. Positions whose series fetch
+    fails are excluded from the whole curve.
     """
     if days < 1 or days > HISTORY_MAX_DAYS:
         from .errors import UsageError
@@ -651,7 +655,6 @@ def history(
                 fwd[day] = last_close
         filled[idx] = fwd
 
-    cash_dec = cash.total if cash.items else Decimal(0)
     series: list[HistoryPoint] = []
     for day in all_dates:
         day_total = Decimal(0)
@@ -660,9 +663,8 @@ def history(
             if close is None:
                 continue  # before this position's first bar (should not happen >= series_start)
             day_total += close * Decimal(positions[idx]["netSize"])
-        day_total = (day_total + cash_dec).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
+        day_total = day_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        # total = positions only (cash reported separately, never added).
         series.append(HistoryPoint(date=day, total=day_total, cash=cash_total))
 
     note = f"{HISTORY_NOTE}; start: {start_label}"

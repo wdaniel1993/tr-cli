@@ -34,17 +34,68 @@ def test_history_series_math():
     h = client.history(m, days=100)
     assert len(h.series) == 100
     assert "no creation events found; last 100 days" in h.note
-    # last day: Apple 10x232.05 + DB 5x16.44 + cash 2234.56
-    assert h.series[-1].total == Decimal("4637.26")
-    assert h.series[-1].cash == "2234.56"
+    # last day: Apple 10x232.05 + DB 5x16.44 = 2402.70 (POSITIONS ONLY)
+    assert h.series[-1].total == Decimal("2402.70")
+    assert h.series[-1].cash == "2234.56"  # cash is separate, never added
     assert h.start_date == h.series[0].date
     assert h.end_date == h.series[-1].date
     assert h.positions_covered == 2
     assert h.positions_without_series == []
     assert "approximate" in h.note.lower() or "retroactively" in h.note
-    # every point includes cash
+    # every point carries the constant cash as a separate field
     for point in h.series:
         assert point.cash == "2234.56"
+
+
+def test_history_cash_never_added_regression():
+    """total must equal exactly the sum of qty*close (forward-filled); cash is separate."""
+    from datetime import UTC as _UTC
+    from decimal import ROUND_HALF_UP
+
+    from tr_cli.mock import FIXTURE_TICKERS, _history_bars, _ytd_base_price
+
+    m = _logged_in(days=50, hide_creation=True)
+    window_days = 50
+    h = client.history(m, days=window_days)
+    assert len(h.series) == window_days
+
+    # Independently recompute the per-position forward-filled closes from the
+    # same fixture the mock serves (visible-bar pricing), then compare.
+    net_size = {"US0378331005": Decimal(10), "DE0005140008": Decimal(5)}
+    raw = {}
+    for isin in net_size:
+        last = next(
+            float(t["last"]["price"])
+            for tkey, t in FIXTURE_TICKERS.items()
+            if tkey.split(".")[0] == isin
+        )
+        payload = _history_bars(_ytd_base_price(isin), last, num_bars=window_days)
+        dates = {}
+        for bar in payload["aggregates"]:
+            day = datetime.fromtimestamp(bar["time"] / 1000, tz=_UTC).date().isoformat()
+            dates[day] = Decimal(str(bar["close"]))
+        raw[isin] = dates
+
+    # forward-fill each position across the union of dates (same rule as client)
+    all_days = sorted({d for dates in raw.values() for d in dates})
+    filled = {}
+    for isin, dates in raw.items():
+        last_close = None
+        fwd = {}
+        for day in all_days:
+            if day in dates:
+                last_close = dates[day]
+            if last_close is not None:
+                fwd[day] = last_close
+        filled[isin] = fwd
+
+    for point in h.series:
+        expected = sum(
+            filled[isin][point.date] * qty for isin, qty in net_size.items()
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        assert point.total == expected, f"total mismatch on {point.date}"
+        assert point.cash == "2234.56"  # separate field, never part of total
+        assert point.total != point.total + Decimal("2234.56")
 
 
 def test_history_dates_are_utc_days():
@@ -66,9 +117,10 @@ def test_history_start_is_max_first_bar():
     assert len(h.series) == 100 - 30
     assert "start = max first bar date" in h.note
     assert "forward-filled" in h.note
-    # day 0 already covers BOTH positions: Apple (forward-filled) + DB (first bar)
-    # -> total is far above Apple-only+cash, no artificial drop at the start
-    assert h.series[0].total > Decimal("2234.56") + Decimal(1000)
+    # day 0 already covers BOTH positions: Apple (forward-filled, ~1013) +
+    # DB (first bar, ~495) -> total ~1907, far above an Apple-only day (~1013),
+    # proving no missing-position prefix and no artificial drop at the start
+    assert h.series[0].total > Decimal(1500)
 
 
 def test_history_forward_fill_no_drop_regression():
@@ -97,8 +149,9 @@ def test_history_failed_series_excluded():
     h = client.history(m, days=60)
     assert h.positions_covered == 1
     assert h.positions_without_series == ["DE0005140008"]
-    # only Apple contributes: last = 10x232.05 + cash
-    assert h.series[-1].total == Decimal("2320.50") + Decimal("2234.56")
+    # only Apple contributes (positions only, no cash add-on)
+    assert h.series[-1].total == Decimal("2320.50")
+    assert h.series[-1].cash == "2234.56"
     assert "without series" in h.note
 
 
@@ -191,7 +244,8 @@ def test_history_cli_json_contract(cli_env):
         "cash": "2234.56",
     }
     assert all("date" in p and "total" in p and "cash" in p for p in data["series"])
-    assert data["series"][-1]["total"] == "4637.26"
+    assert data["series"][-1]["total"] == "2402.70"  # positions only
+    assert data["series"][-1]["cash"] == "2234.56"  # cash separate
     assert "account created" in data["note"]  # detection ran (CUSTOMER_CREATED fixture)
 
 

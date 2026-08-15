@@ -294,3 +294,15 @@ App version served: `2.2632.29` (index.js + HTML meta). TR_APP_VERSION default b
   positions → sum qty×close + cash. JSON gains `coverage {positions,
   forward_filled, start_rule}`; note documents the rule. Regression test:
   synthetic middle gap must not drop the total.
+
+### history — positions-only total bugfix (2026-08-15, v0.2.3)
+
+- **Bug**: per-day `total` added the constant cash (3552.53) → backfill 08-14
+  total 186829.56 = 182961.06 (positions) + 316 (quote drift) + 3552.53 →
+  ~1.9% boundary step vs snapshot totals (positions-only).
+- **Fix**: `total` = Σ (qty × close), positions only (matches
+  `portfolio.totalValue` / the TR app); per-point `cash` field kept as a
+  separate constant for the chart's cash line, never added. Note wording
+  updated ("cash reported separately (constant)").
+- Verified: last backfill point (positions-only) vs snapshot totalValue within
+  0.17% quote drift (< 0.5% target).
