@@ -325,6 +325,82 @@ def _ytd_base_price(isin: str) -> float:
     return 100.0
 
 
+# --- portfolio-chart + REST timeline fixtures (v0.3.0; synthetic values) ----
+
+
+def _day_ago(days_ago: float) -> str:
+    from datetime import datetime, timedelta
+
+    return (datetime.now(UTC) - timedelta(days=days_ago)).date().isoformat()
+
+
+def _mock_chart_points(range_: str) -> list[dict]:
+    """Synthetic portfolio-chart points (netValue positions only, EUR).
+
+    `timestamp` is ms since epoch (UTC), like the real endpoint.
+    """
+    from datetime import datetime
+
+    points = []
+    if range_ == "1y":
+        # daily points, last 260 days
+        for i in range(261):
+            day = _day_ago(260 - i)
+            ms = int(datetime.fromisoformat(day + "T00:00:00+00:00").timestamp() * 1000)
+            net = 100000.0 + i * (50000.0 / 260)
+            points.append({"timestamp": ms, "netValue": f"{net:.2f}"})
+    elif range_ == "max":
+        # coarser points from 360 days ago; first point 0.00 (no holdings yet)
+        for i in range(19):
+            day = _day_ago(360 - i * 20)
+            ms = int(datetime.fromisoformat(day + "T00:00:00+00:00").timestamp() * 1000)
+            if i == 0:
+                net = 0.0
+            else:
+                net = 110000.0 + i * (40000.0 / 18)
+            points.append({"timestamp": ms, "netValue": f"{net:.2f}"})
+    return points
+
+
+# Cash-moving events summing EXACTLY to FIXTURE_CASH total (2234.56) so the
+# reconciliation invariant holds. Includes one INFORMATIONAL event
+# (SAVINGS_PLAN_INVOICE_CREATED) with an amount that MUST be excluded —
+# if double-counted, the invariant breaks.
+def _mock_cash_events() -> list[dict]:
+    def ev(eid, days_ago, etype, value):
+        return {
+            "id": eid,
+            "timestamp": _ts(days_ago),
+            "eventType": etype,
+            "amount": {"currency": "EUR", "value": value, "fractionDigits": 2},
+            "status": "EXECUTED",
+            "cashAccountNumber": "0000000001",
+        }
+
+    return [
+        ev("ev-01", 120, "BANK_TRANSACTION_INCOMING", 3150.0),
+        ev("ev-02", 100, "BANK_TRANSACTION_OUTGOING", -900.0),
+        ev("ev-03", 80, "BANK_TRANSACTION_INCOMING", 600.0),
+        ev("ev-04", 60, "TRADING_SAVINGSPLAN_EXECUTED", -150.0),
+        ev("ev-05", 50, "SSP_CORPORATE_ACTION_DIVIDEND_EQUIVALENT", -184.4),
+        ev("ev-06", 40, "INTEREST_PAYOUT", 7.63),
+        ev("ev-07", 30, "CARD_TRANSACTION", -123.67),
+        ev("ev-08", 20, "SAVEBACK_AGGREGATE", -15.0),
+        # invoice IS a real cash movement here (verified: no duplicate of the
+        # executed events) — counted, and the total still equals current cash
+        ev("ev-09", 10, "SAVINGS_PLAN_INVOICE_CREATED", -150.0),
+        # informational: NO amount -> must be skipped by the reconstruction
+        {
+            "id": "ev-10",
+            "timestamp": _ts(5),
+            "eventType": "EX_POST_COST_REPORT_CREATED",
+            "amount": None,
+            "status": "EXECUTED",
+            "cashAccountNumber": "0000000001",
+        },
+    ]
+
+
 def _history_bars(
     base_price: float,
     last_price: float,
@@ -415,6 +491,7 @@ class MockTransport(Transport):
         *,
         json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> HttpResponse:
         self._requests.append((method.upper(), path))
         body: str
@@ -463,6 +540,37 @@ class MockTransport(Transport):
                 body = '{"errors":[{"errorCode":"UNAUTHENTICATED"}]}'
             else:
                 body = _json(FIXTURE_ACCOUNT)
+
+        elif path == "/api-gateway/portfolio-chart/v2/chart":
+            range_ = (params or {}).get("range")
+            if range_ not in ("1y", "max"):
+                # 3y/6m etc. are broken server-side (HTTP 400) — emulate.
+                status = 400
+                body = '{"error":"mock: invalid range"}'
+            else:
+                body = _json({"points": _mock_chart_points(range_)})
+
+        elif path == "/api/v2/timeline/transactions":
+            items = _mock_cash_events()
+            # paginate by 3 items per page; cursor = base64 page index
+            import base64 as _b64
+
+            older = (params or {}).get("olderThan")
+            page = 0
+            if older:
+                try:
+                    page = int(_b64.b64decode(older).decode())
+                except (ValueError, TypeError):
+                    page = 0
+            start = page * 3
+            page_items = items[start : start + 3]
+            has_more = start + 3 < len(items)
+            after = (
+                _b64.b64encode(str(page + 1).encode()).decode() if has_more else None
+            )
+            body = _json(
+                {"items": page_items, "cursors": {"after": after, "before": None}}
+            )
 
         elif path.startswith("/api/"):
             body = '{"error":"mock: unknown path"}'

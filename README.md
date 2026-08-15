@@ -28,31 +28,31 @@ tr-cli rates DE0005140008 US0378331005
 tr-cli details US0378331005
 ```
 
-### History (value curve backfill)
+### History (official portfolio chart + reconstructed cash)
 
-`tr-cli history` builds a daily portfolio value curve from CURRENT holdings +
-per-position daily close series (`tradeAggregateHistory`), over one WS
-connection. The **start date is auto-detected** from the account timeline
-(earliest of `CUSTOMER_CREATED` / `SECURITIES_ACCOUNT_CREATED` /
-`VERIFICATION_TRANSFER_ACCEPTED` / earliest deposit), overridable with
-`--since YYYY-MM-DD`. `--days N` (default 90, max 730) is the fallback window
-when no start signal is detectable. The `note` states the detected source
-(e.g. `account created 2025-11-02`); the server caps daily bars at ~200, so
-very long windows are truncated with a note.
+`tr-cli history` uses Trade Republic's **official portfolio-chart REST endpoint**
+(`api-gateway/portfolio-chart/v2/chart?range=1y` daily + `range=max` coarser,
+merged — daily wins on overlap; the curve starts at the first non-zero
+netValue point). `total` = positions only (netValue, matches the TR app).
+`approximate` is `false` — the chart reflects real historical holdings (no
+retroactive-quantity approximation).
 
-For each day, `total` = Σ (qty × close) over positions, **forward-filled per
-position** (each position's last known close is carried across gaps from thin
-trading or differing market calendars — never summed with fewer positions).
-`total` is **positions only** — matching `portfolio.totalValue` and the TR app —
-and the per-point `cash` field carries the constant current cash separately for
-the chart's cash line (never added to `total`). The series starts at the
-**latest first bar date across positions** so every day covers ALL positions
-(no artificial drops); the JSON `coverage` object and the note document this.
-Positions bought mid-window appear across their whole price history — hence
-`approximate: true`. `--json` contract for scripts: `{ok, start_date, end_date,
-days, approximate, note, coverage, series: [{date, total, cash|null}]}`. Human
-output is a compact date/total/Δ table. `history` totals are positions-only and
-merge with `portfolio.totalValue` (cash excluded in both).
+**Cash** is reconstructed from the timeline transactions REST feed:
+`cash(date) = current_cash − Σ(signed amounts of cash-moving events after
+date)`, constant between events and ~0 before the first event. Only
+cash-moving event types count (informational events like
+`SAVINGS_PLAN_INVOICE_CREATED` are excluded to avoid double counting — guarded
+by a reconciliation invariant test). The per-point `cash` field is the
+reconstructed value; it is never added into `total`.
+
+Flags: `--since YYYY-MM-DD` (start the curve at a date), `--days N` (limit the
+window, default: full curve), `--snapshots <file>` (JSON `[{date, total}]` of
+collector snapshots that override chart points on matching dates).
+
+`--json` contract: `{ok, start_date, end_date, days, approximate, note,
+coverage, series: [{date, total, cash}]}`; the note states granularity ("daily
+since <date>, coarser before") and the cash reconstruction summary. Human
+output is a compact date/total/cash/Δ table.
 
 ### Timeline
 

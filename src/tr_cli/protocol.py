@@ -96,6 +96,39 @@ CHART_RANGE = {
     "5y": "5y",
     "max": "max",
 }
+# Ranges that actually work on the portfolio-chart endpoint (3y/6m -> HTTP 400).
+PORTFOLIO_CHART_RANGES = ("1y", "max")
+
+# Cash-moving event vocabulary observed in the REST timeline transactions feed
+# (verified live 2026-08-15). The feed is the cash-movement feed BY
+# CONSTRUCTION: every item carries a signed `amount`. The reconstruction rule
+# is therefore: ANY amount-bearing event counts (see client._fetch_cash_events).
+# SAVINGS_PLAN_INVOICE_CREATED was verified NOT to duplicate
+# TRADING_SAVINGSPLAN_EXECUTED (0 (date, amount) overlap in Daniel's data) and
+# IS counted; excluding it broke the reconciliation invariant by ~-4942 EUR.
+# This set is kept for documentation / as a known-vocabulary index.
+CASH_MOVING_EVENT_TYPES = frozenset(
+    {
+        "BANK_TRANSACTION_INCOMING",
+        "BANK_TRANSACTION_OUTGOING",
+        "PAYMENT_INBOUND",
+        "PAYMENT_OUTBOUND",
+        "ORDER_EXECUTED",
+        "TRADE_INVOICE",
+        "TRADING_TRADE_EXECUTED",
+        "TRADING_SAVINGSPLAN_EXECUTED",
+        "SAVINGS_PLAN_INVOICE_CREATED",
+        "INTEREST_PAYOUT",
+        "INTEREST_PAYOUT_CREATED",
+        "SSP_CORPORATE_ACTION_DIVIDEND_EQUIVALENT",
+        "SSP_CORPORATE_ACTION_CASH",
+        "CARD_TRANSACTION",
+        "CARD_AFT",
+        "CARD_REFUND",
+        "CARD_VERIFICATION",
+        "SAVEBACK_AGGREGATE",
+    }
+)
 
 
 def year_start_millis(year: int = 2026) -> int:

@@ -14,25 +14,26 @@ collect batches (see ws.collect). Wire topics used:
 from __future__ import annotations
 
 import re
-from collections.abc import Hashable
 from dataclasses import dataclass, field
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from .errors import NeedsLogin, ProtocolError
 from .protocol import (
+    PORTFOLIO_CHART_ENDPOINT,
     RESOLUTION_1D_MS,
+    TIMELINE_REST_TRANSACTIONS,
     TRADE_AGGREGATE_HISTORY_TOPIC,
     year_start_millis,
 )
 from .transport import Transport
 
-HISTORY_DEFAULT_DAYS = 90  # fallback when no account-start signal is detectable
-HISTORY_MAX_DAYS = 730
-HISTORY_NOTE = (
-    "current quantities applied retroactively; cash reported separately (constant)"
+HISTORY_DEFAULT_DAYS = (
+    90  # kept for compat; --days now limits the window (default: full)
 )
+HISTORY_MAX_DAYS = 730
+HISTORY_NOTE = "official portfolio chart (positions only); cash reconstructed from transaction history"
 
 BOND_PATTERN = re.compile(
     r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|"
@@ -415,7 +416,8 @@ def details(transport: Transport, isin: str, *, timeout: float = 6.0) -> dict[st
 
 @dataclass
 class HistoryPoint:
-    """One day of the backfilled curve. `total` includes the constant cash."""
+    """One day of the historical curve. `total` = positions (official chart
+    netValue); `cash` = reconstructed cash at the start of that day (UTC)."""
 
     date: str  # YYYY-MM-DD (UTC)
     total: Decimal
@@ -427,269 +429,290 @@ class HistoryResult:
     series: list[HistoryPoint]
     start_date: str | None
     end_date: str | None
-    cash: str | None
+    cash: str | None  # current cash (the anchor of the reconstruction)
     note: str
-    positions_covered: int
-    positions_without_series: list[str] = field(default_factory=list)
+    approximate: bool = False
+    snapshots_merged: int = 0
+    cash_events: int = 0
+    cash_residual: Decimal | None = None  # current_cash - sum(all events)
+
+
+def _fetch_portfolio_chart(
+    transport: Transport, sec_acc_no: str, range_: str, *, timeout: float = 8.0
+) -> list[tuple[str, Decimal]]:
+    """GET the official portfolio chart; returns [(date, netValue)] (UTC days)."""
+    resp = transport.request(
+        "GET",
+        PORTFOLIO_CHART_ENDPOINT,
+        params={"secAccNo": sec_acc_no, "range": range_, "currency": "EUR"},
+    )
+    if resp.status_code != 200:
+        raise ProtocolError(
+            f"portfolio-chart {range_} failed: HTTP {resp.status_code} {resp.body[:200]!r}"
+        )
+    try:
+        j = resp.json()
+    except Exception as e:
+        raise ProtocolError(
+            f"portfolio-chart {range_} body not JSON: {resp.body[:120]!r}"
+        ) from e
+    points = j.get("points") if isinstance(j, dict) else j
+    if not isinstance(points, list):
+        raise ProtocolError(
+            f"portfolio-chart {range_}: unexpected payload {str(j)[:120]!r}"
+        )
+
+    out: list[tuple[str, Decimal]] = []
+    for pt in points:
+        if (
+            not isinstance(pt, dict)
+            or pt.get("timestamp") is None
+            or pt.get("netValue") is None
+        ):
+            continue
+        try:
+            day = (
+                datetime.fromtimestamp(int(pt["timestamp"]) / 1000, tz=UTC)
+                .date()
+                .isoformat()
+            )
+            net = Decimal(str(pt["netValue"]))
+        except (ValueError, TypeError, ArithmeticError):
+            continue
+        out.append((day, net))
+    return out
+
+
+def _fetch_cash_events(
+    transport: Transport, *, timeout: float = 8.0, max_pages: int = 50
+) -> list[tuple[str, Decimal]]:
+    """REST timeline transactions (paginated via olderThan cursor); returns
+    [(date, signed amount)] for CASH-MOVING event types only."""
+    from . import timeline as timeline_mod
+
+    events: list[tuple[str, Decimal]] = []
+    cursor: str | None = None
+    for _page in range(max_pages):
+        params: dict[str, Any] = {"limit": 100}
+        if cursor:
+            params["olderThan"] = cursor
+        resp = transport.request("GET", TIMELINE_REST_TRANSACTIONS, params=params)
+        if resp.status_code != 200:
+            raise ProtocolError(
+                f"timeline transactions failed: HTTP {resp.status_code} {resp.body[:200]!r}"
+            )
+        try:
+            j = resp.json()
+        except Exception as e:
+            raise ProtocolError(
+                f"timeline transactions body not JSON: {resp.body[:120]!r}"
+            ) from e
+        items = j.get("items") if isinstance(j, dict) else []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            # The REST transactions feed is the cash-movement feed: every item
+            # carries a signed amount. Any amount-bearing event counts (verified
+            # live: all 335 items had amounts; no informational duplicates).
+            amt = it.get("amount")
+            if not isinstance(amt, dict) or amt.get("value") is None:
+                continue
+            ts = it.get("timestamp") or ""
+            try:
+                day = timeline_mod.parse_timestamp(ts).date().isoformat()
+            except (ValueError, TypeError):
+                continue
+            try:
+                events.append((day, Decimal(str(amt["value"]))))
+            except (ValueError, TypeError, ArithmeticError):
+                continue
+        cursors = j.get("cursors") if isinstance(j, dict) else {}
+        cursor = cursors.get("after") if isinstance(cursors, dict) else None
+        if not cursor or not items:
+            break
+    return events
+
+
+def _reconstruct_cash(
+    events: list[tuple[str, Decimal]],
+    current_cash: Decimal,
+    series_dates: list[str] | None = None,
+) -> tuple[dict[str, Decimal], int, Decimal]:
+    """cash(date) = current_cash - S + P(<date) where S = sum of all amounts and
+    P(<date) = sum of amounts with event date BEFORE date. Returns
+    ({date: cash for requested dates}, total_S, event_count)."""
+    from collections import defaultdict
+
+    by_date: dict[str, Decimal] = defaultdict(Decimal)
+    for day, amt in events:
+        by_date[day] += amt
+    event_dates = sorted(by_date)
+    prefix: list[Decimal] = []
+    acc = Decimal(0)
+    for d in event_dates:
+        prefix.append(acc)
+        acc += by_date[d]
+    total_s = acc
+    prefix.append(total_s)  # sentinel for bisect_left == len(event_dates)
+
+    import bisect
+
+    def cash_at(day: str) -> Decimal:
+        idx = bisect.bisect_left(event_dates, day)
+        return current_cash - total_s + prefix[idx]
+
+    target = series_dates if series_dates is not None else event_dates
+    return {d: cash_at(d) for d in target}, total_s, len(events)
+
+
+def _load_snapshots(snapshots: Any) -> list[tuple[str, Decimal]]:
+    """Normalize an optional snapshot list [{date, total}] -> [(date, total)]."""
+    out: list[tuple[str, Decimal]] = []
+    if not snapshots:
+        return out
+    for snap in snapshots:
+        if not isinstance(snap, dict) or not snap.get("date"):
+            continue
+        try:
+            out.append((str(snap["date"]), Decimal(str(snap["total"]))))
+        except (ValueError, TypeError, ArithmeticError):
+            continue
+    return out
 
 
 def history(
     transport: Transport,
     *,
     since: str | None = None,
-    days: int = HISTORY_DEFAULT_DAYS,
+    days: int | None = None,
     timeout: float = 8.0,
+    snapshots: list[dict[str, Any]] | None = None,
 ) -> HistoryResult:
-    """Backfill a daily portfolio value curve from current holdings.
+    """Historical portfolio value + reconstructed cash.
 
-    Start-date resolution (in priority order):
-      1. `since` (explicit YYYY-MM-DD override);
-      2. auto-detected account start from the timeline (CUSTOMER_CREATED /
-         SECURITIES_ACCOUNT_CREATED / VERIFICATION_TRANSFER_ACCEPTED / earliest
-         deposit);
-      3. fallback: now − `days` (default 90) when no signal is found.
+    PRIMARY SOURCE: the official portfolio-chart REST endpoint
+    (api-gateway/portfolio-chart/v2/chart?range=1y daily + range=max coarser).
+    Merge order: max (coarser) -> 1y (daily wins on overlap) -> optional local
+    snapshots (highest priority). The curve starts at the first NON-ZERO
+    netValue point. total = positions only (netValue — matches portfolio
+    totalValue and the TR app). approximate = False: the chart reflects real
+    historical holdings (no retroactive-quantity approximation).
 
-    ONE WS connection, three sequential rounds (portfolio+cash → instruments →
-    daily bars). Per date: total = Σ (qty × close) over positions
-    (forward-filled) — POSITIONS ONLY, matching `portfolio.totalValue`
-    semantics; the current cash is reported separately as a constant per-point
-    `cash` field and is NEVER added into `total`. Positions whose series fetch
-    fails are excluded from the whole curve.
+    CASH: reconstructed from the REST timeline transactions feed — cash(date) =
+    current_cash - sum(signed amounts of cash-moving events with timestamp
+    > date at 00:00 UTC), constant between events, ~0 before the first event.
     """
-    if days < 1 or days > HISTORY_MAX_DAYS:
+    if days is not None and (days < 1 or days > HISTORY_MAX_DAYS):
         from .errors import UsageError
 
         raise UsageError(f"--days must be between 1 and {HISTORY_MAX_DAYS}.")
-
-    from datetime import date as _date
-    from datetime import datetime
-
-    start_label: str
-    start_date: _date
     if since is not None:
+        from datetime import date as _date
+
         try:
-            start_date = _date.fromisoformat(since)
+            _date.fromisoformat(since)
         except ValueError:
             from .errors import UsageError
 
             raise UsageError(f"Invalid --since {since!r}; expected YYYY-MM-DD.")
-        start_label = f"explicit --since {since}"
-    else:
-        from . import timeline as timeline_mod
 
-        detected = timeline_mod.detect_account_start(transport, timeout=timeout)
-        if detected is not None:
-            dstr, source = detected
-            start_date = _date.fromisoformat(dstr)
-            if source == "CUSTOMER_CREATED":
-                start_label = f"account created {dstr}"
-            elif source == "SECURITIES_ACCOUNT_CREATED":
-                start_label = f"securities account created {dstr}"
-            elif source == "VERIFICATION_TRANSFER_ACCEPTED":
-                start_label = f"first verification transfer {dstr}"
-            else:
-                start_label = f"earliest deposit {dstr}"
-        else:
-            from datetime import datetime as _dt
-            from datetime import timedelta as _td
-
-            start_date = (_dt.now(UTC) - _td(days=days)).date()
-            start_label = f"no creation events found; last {days} days"
-
-    start_ms = int(
-        datetime(
-            start_date.year, start_date.month, start_date.day, tzinfo=UTC
-        ).timestamp()
-        * 1000
-    )
-    now_ms = int(datetime.now(UTC).timestamp() * 1000)
-    from_millis = start_ms
     acct = account(transport)
     sec_acc_no = acct.securities_account_number
     if not sec_acc_no:
         raise ProtocolError("Account response did not include securitiesAccountNumber.")
 
-    # ONE connection: round 0 = portfolio+cash, round 1 = instruments,
-    # round 2 = daily series (built from the earlier rounds' replies).
-    def build_round(
-        r_index: int, so_far: dict[int, dict[Hashable, Any]]
-    ) -> list[tuple[Hashable, dict[str, Any]]] | None:
-        if r_index == 0:
-            return [
-                (
-                    "portfolio",
-                    {"type": "compactPortfolioByType", "secAccNo": sec_acc_no},
-                ),
-                ("cash", {"type": "cash"}),
-            ]
-        if r_index == 1:
-            pf = so_far.get(0, {}).get("portfolio", {})
-            raw = _normalize_positions(pf) if isinstance(pf, dict) else []
-            return [
-                (idx, {"type": "instrument", "id": pos["instrumentId"]})
-                for idx, pos in enumerate(raw)
-            ]
-        if r_index == 2:
-            raw = _normalize_positions(so_far.get(0, {}).get("portfolio", {}))
-            instruments = so_far.get(1, {})
-            batch = []
-            for idx, pos in enumerate(raw):
-                ex = (instruments.get(idx) or {}).get("exchangeIds") or []
-                ex = ex[0] if ex else None
-                if not ex:
-                    continue
-                batch.append(
-                    (
-                        idx,
-                        {
-                            "type": TRADE_AGGREGATE_HISTORY_TOPIC,
-                            "isin": pos["instrumentId"],
-                            "exchangeId": ex,
-                            "resolution": RESOLUTION_1D_MS,
-                            "from": from_millis,
-                            "until": now_ms,
-                        },
-                    )
-                )
-            return batch
-        return None
+    # --- 1) portfolio chart (1y daily + max coarser) -------------------------
+    chart_1y = _fetch_portfolio_chart(transport, sec_acc_no, "1y", timeout=timeout)
+    chart_max = _fetch_portfolio_chart(transport, sec_acc_no, "max", timeout=timeout)
+    y1_start = chart_1y[0][0] if chart_1y else None
 
-    rounds_out = transport.ws_rounds(build_round, timeout=timeout)
+    merged: dict[str, Decimal] = {}
+    for day, net in chart_max:
+        merged[day] = net
+    for day, net in chart_1y:
+        merged[day] = net  # daily wins over coarser on overlap
 
-    portfolio_payload = rounds_out.get(0, {}).get("portfolio", {})
-    raw_positions = (
-        _normalize_positions(portfolio_payload)
-        if isinstance(portfolio_payload, dict)
-        else []
-    )
-    cash = _parse_cash(rounds_out.get(0, {}).get("cash"))
-    cash_total = str(cash.total) if cash.items else None
+    snapshot_pairs = _load_snapshots(snapshots)
+    for day, total in snapshot_pairs:
+        merged[day] = total  # collector snapshots override everything
 
-    positions: list[dict[str, Any]] = [
-        {"instrumentId": pos["instrumentId"], "netSize": str(pos.get("netSize") or "0")}
-        for pos in raw_positions
-    ]
-    if not positions:
+    # drop leading zero-netValue points (account held nothing before first buy)
+    dates = sorted(merged)
+    first_nonzero = next((i for i, d in enumerate(dates) if merged[d] != 0), None)
+    if first_nonzero is None:
         return HistoryResult(
             series=[],
             start_date=None,
             end_date=None,
-            cash=cash_total,
+            cash=None,
             note=HISTORY_NOTE,
-            positions_covered=0,
+            approximate=False,
         )
+    dates = dates[first_nonzero:]
 
-    instruments = rounds_out.get(1, {})
-    for idx, resp in instruments.items():
-        if isinstance(resp, dict):
-            positions[idx]["name"] = resp.get("shortName") or resp.get("name")
-            ex = resp.get("exchangeIds") or []
-            positions[idx]["exchangeIds"] = ex
+    # --- 2) current cash + reconstruction -------------------------------------
+    cash_resp = transport.ws_collect([("cash", {"type": "cash"})], timeout=timeout)
+    cash = _parse_cash(cash_resp.get("cash"))
+    current_cash = cash.total if cash.items else Decimal(0)
+    cash_str = str(current_cash) if cash.items else None
 
-    covered: set[str] = set()
-    bars_by_position: dict[int, dict[str, Decimal]] = {}
-    series_map = rounds_out.get(2, {})
-    for idx, resp in series_map.items():
-        if not isinstance(resp, dict):
-            continue
-        aggregates = resp.get("aggregates") or []
-        dates: dict[str, Decimal] = {}
-        for bar in aggregates:
-            if (
-                not isinstance(bar, dict)
-                or bar.get("time") is None
-                or bar.get("close") is None
-            ):
-                continue
-            try:
-                day = (
-                    datetime.fromtimestamp(int(bar["time"]) / 1000, tz=UTC)
-                    .date()
-                    .isoformat()
-                )
-                dates[day] = Decimal(str(bar["close"]))
-            except (ValueError, TypeError, ArithmeticError):
-                continue
-        if dates:
-            bars_by_position[idx] = dates
-            covered.add(positions[idx]["instrumentId"])
-
-    missing = [
-        it["instrumentId"] for it in positions if it["instrumentId"] not in covered
-    ]
-    if not bars_by_position:
-        return HistoryResult(
-            series=[],
-            start_date=None,
-            end_date=None,
-            cash=cash_total,
-            note=HISTORY_NOTE,
-            positions_covered=0,
-            positions_without_series=missing,
-        )
-
-    # Series range: start at the LATEST first-bar date across positions so
-    # every series day covers ALL positions; dates = union of bar dates
-    # (trading days), filtered to the range.
-    first_dates = [min(dates) for dates in bars_by_position.values()]
-    series_start = max(first_dates)
-    all_dates = sorted(
-        d
-        for d in {d for dates in bars_by_position.values() for d in dates}
-        if d >= series_start
+    events = _fetch_cash_events(transport, timeout=timeout)
+    cash_map, total_s, n_events = _reconstruct_cash(
+        events, current_cash, series_dates=dates
     )
 
-    # Forward-fill per position: carry the last known close forward across
-    # gaps (thin trading / different market calendars). Nothing is filled
-    # BEFORE a position's first bar, so starting at `series_start` every day
-    # has a value for every position — no artificial drops from missing bars.
-    filled: dict[int, dict[str, Decimal]] = {}
-    for idx, dates in bars_by_position.items():
-        last_close: Decimal | None = None
-        fwd: dict[str, Decimal] = {}
-        for day in all_dates:
-            close = dates.get(day)
-            if close is not None:
-                last_close = close
-            if last_close is not None:
-                fwd[day] = last_close
-        filled[idx] = fwd
-
+    # --- 3) series --------------------------------------------------------------
     series: list[HistoryPoint] = []
-    for day in all_dates:
-        day_total = Decimal(0)
-        for idx, fwd in filled.items():
-            close = fwd.get(day)
-            if close is None:
-                continue  # before this position's first bar (should not happen >= series_start)
-            day_total += close * Decimal(positions[idx]["netSize"])
-        day_total = day_total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        # total = positions only (cash reported separately, never added).
-        series.append(HistoryPoint(date=day, total=day_total, cash=cash_total))
-
-    note = f"{HISTORY_NOTE}; start: {start_label}"
-    if missing:
-        note += f"; positions without series: {', '.join(missing)}"
-    if series:
-        # Server returns at most ~200 daily bars; detect truncation vs the
-        # requested start (allow a few days for the first trading day).
-        try:
-            first_bar = datetime.fromisoformat(series[0].date).date()
-            if first_bar > start_date + timedelta(days=3):
-                note += f"; series truncated server-side (oldest bar {series[0].date})"
-        except (ValueError, TypeError):
-            pass
-        # Forward-fill policy documentation (start = max first bar date).
-        note += (
-            f"; start = max first bar date ({series_start}) -> every day covers "
-            f"{len(bars_by_position)}/{len(bars_by_position)} positions (forward-filled)"
+    negative_days: list[str] = []
+    for day in dates:
+        day_total = merged[day].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        cash_at = cash_map.get(day)
+        if cash_at is None:
+            # day outside any event dates: use prefix walk via the map's nearest
+            cash_at = current_cash - total_s
+        cash_at_q = cash_at.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if cash_at_q < 0:
+            negative_days.append(day)
+        series.append(
+            HistoryPoint(
+                date=day,
+                total=day_total,
+                cash=str(cash_at_q) if cash_str is not None else None,
+            )
         )
+
+    # --- 4) filters + note -------------------------------------------------------
+    if since is not None:
+        series = [p for p in series if p.date >= since]
+    if days is not None and series:
+        cutoff = (
+            datetime.fromisoformat(series[-1].date).date() - timedelta(days=days)
+        ).isoformat()
+        series = [p for p in series if p.date >= cutoff]
+
+    residual = current_cash - total_s
+    note = HISTORY_NOTE
+    granularity = f"daily since {y1_start}" if y1_start else "coarser only"
+    note += f"; {granularity} (coarser before)"
+    note += f"; cash reconstructed from {n_events} events"
+    if residual != 0:
+        note += f"; cash residual (current - sum events): {residual:.2f}"
+    if snapshot_pairs:
+        note += f"; snapshots merged: {len(snapshot_pairs)}"
+    if negative_days:
+        note += (
+            f"; WARNING cash went negative on {len(negative_days)} day(s) "
+            f"starting {negative_days[0]} (classification may be incomplete)"
+        )
+
     return HistoryResult(
         series=series,
         start_date=series[0].date if series else None,
         end_date=series[-1].date if series else None,
-        cash=cash_total,
+        cash=cash_str,
         note=note,
-        positions_covered=len(covered),
-        positions_without_series=missing,
+        approximate=False,
+        snapshots_merged=len(snapshot_pairs),
+        cash_events=n_events,
+        cash_residual=residual,
     )

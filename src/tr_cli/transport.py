@@ -57,8 +57,10 @@ class Transport(ABC):
         *,
         json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> HttpResponse:
-        """HTTP request to {API_BASE}{path}. Cookies are managed internally."""
+        """HTTP request to {API_BASE}{path} with optional query params.
+        Cookies are managed internally."""
 
     @abstractmethod
     def ws_collect(
@@ -136,6 +138,7 @@ class RealTransport(Transport):
         *,
         json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> HttpResponse:
         try:
             r = self._http.request(
@@ -143,6 +146,7 @@ class RealTransport(Transport):
                 API_BASE + path,
                 json=json_body,
                 headers=headers,
+                params=params,
                 timeout=25,
             )
         except requests.RequestException as e:

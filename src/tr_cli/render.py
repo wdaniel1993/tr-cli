@@ -231,24 +231,24 @@ def render_timeline(result, *, days: int = 90, bucket: str | None = None) -> str
     return "\n".join(lines)
 
 
-def render_history(result, *, days: int = 365) -> str:
+def render_history(result, *, days: int | None = None) -> str:
     """Compact table for the history command."""
     lines: list[str] = []
-    lines.append(
-        f"HISTORY (last {days} days — approximate: current quantities retroactive, cash constant)"
-    )
+    window = f"last {days} days" if days else "full curve"
+    lines.append(f"HISTORY ({window} — official portfolio chart + reconstructed cash)")
     if not result.series:
-        lines.append("(no series — no positions or no price data)")
+        lines.append("(no series)")
         return "\n".join(lines)
-    lines.append(f"{'date':<12} {'total':>12} {'Δ':>12}")
+    lines.append(f"{'date':<12} {'total':>12} {'cash':>12} {'Δ':>12}")
     prev: float | None = None
     for point in result.series:
         total = float(point.total)
+        cash = point.cash if point.cash is not None else "-"
         delta = ""
         if prev is not None:
             delta = f"{total - prev:+,.2f}"
-        lines.append(f"{point.date:<12} {total:>12,.2f} {delta:>12}")
+        lines.append(f"{point.date:<12} {total:>12,.2f} {cash:>12} {delta:>12}")
         prev = total
     lines.append("")
-    lines.append(f"positions covered: {result.positions_covered} | note: {result.note}")
+    lines.append(f"note: {result.note}")
     return "\n".join(lines)

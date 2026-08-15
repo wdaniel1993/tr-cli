@@ -372,35 +372,45 @@ def timeline(
 
 @app.command()
 def history(
-    days: int = typer.Option(
-        90,
+    days: int | None = typer.Option(
+        None,
         "--days",
-        help="Fallback window when no account start is detectable (default 90, max 730).",
+        help="Limit the window to the last N days (default: full curve, max 730).",
     ),
     since: str | None = typer.Option(
         None,
         "--since",
-        help="Explicit start date YYYY-MM-DD (overrides auto-detection).",
+        help="Start the curve at YYYY-MM-DD.",
+    ),
+    snapshots: str | None = typer.Option(
+        None,
+        "--snapshots",
+        help="JSON file with collector snapshots [{date, total}] that override chart points.",
     ),
 ) -> None:
-    """Backfill a daily portfolio value curve from current holdings.
-
-    Start is auto-detected from the timeline (account creation events /
-    earliest deposit), overridable with --since. --days is the fallback
-    window when no start signal is found.
-    """
+    """Historical portfolio value curve (official portfolio chart) + reconstructed cash."""
     mock = _ctx_mock()
     base_dir = _ctx_base_dir()
-    if days < 1 or days > 730:
+    if days is not None and (days < 1 or days > 730):
         _fail(_usage("--days must be between 1 and 730."))
     if since is not None:
         try:
             datetime.fromisoformat(since)
         except ValueError:
             _fail(_usage(f"Invalid --since {since!r}; expected YYYY-MM-DD."))
+    snap_list: list[dict[str, Any]] | None = None
+    if snapshots is not None:
+        try:
+            import pathlib as _pl
+
+            snap_list = json.loads(_pl.Path(snapshots).read_text())
+        except (OSError, ValueError) as e:
+            _fail(_usage(f"Cannot read snapshots file {snapshots!r}: {e}"))
     try:
         transport = _session_transport(mock, base_dir)
-        result = client_mod.history(transport, days=days, since=since)
+        result = client_mod.history(
+            transport, days=days, since=since, snapshots=snap_list
+        )
     except TrCliError as e:
         _fail(e)
     data = {
@@ -408,12 +418,14 @@ def history(
         "start_date": result.start_date,
         "end_date": result.end_date,
         "days": len(result.series),
-        "approximate": True,
+        "approximate": result.approximate,
         "note": result.note,
         "coverage": {
-            "positions": result.positions_covered,
-            "forward_filled": True,
-            "start_rule": "max(first bar date)",
+            "source": "portfolio-chart",
+            "ranges": ["1y", "max"],
+            "cash": "reconstructed",
+            "cash_events": result.cash_events,
+            "snapshots_merged": result.snapshots_merged,
         },
         "series": [
             {"date": p.date, "total": str(p.total), "cash": p.cash}

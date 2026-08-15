@@ -306,3 +306,45 @@ App version served: `2.2632.29` (index.js + HTML meta). TR_APP_VERSION default b
   updated ("cash reported separately (constant)").
 - Verified: last backfill point (positions-only) vs snapshot totalValue within
   0.17% quote drift (< 0.5% target).
+
+### v0.3.0 — extended history: official portfolio chart + cash reconstruction (2026-08-15)
+
+- **Portfolio chart REST** (the portfolioAggregateHistory replacement, verified
+  live): `GET /api-gateway/portfolio-chart/v2/chart?secAccNo=<sec>&range=<1y|max>
+  &currency=EUR` -> `{points:[{timestamp(ms), netValue(string),
+  performance{...}}]}`. range=1y -> 258 daily points (2025-08-15..2026-08-14,
+  netValue positions-only, last == app total); range=max -> 115 coarser points
+  (2024-05-27..2026-08-14, first netValue 0.00). **3y/6m -> HTTP 400** (broken
+  server-side); only 1y + max used. tr-cli merges (daily wins on overlap),
+  drops leading zero-netValue points, overlays optional collector snapshots.
+- **Timeline transactions REST** (verified live): `GET
+  /api/v2/timeline/transactions?limit=100` + `&olderThan=<cursors.after>`
+  (base64 keyset; 30 items/page, 335 events to 2024-05-29). Items carry signed
+  `amount {currency, value, fractionDigits}` and `cashAccountNumber` (REAL —
+  never printed/committed).
+- **Cash reconstruction**: cash(date) = current_cash − Σ(cash-moving event
+  amounts after date). Cash-moving set: BANK_TRANSACTION_INCOMING/OUTGOING,
+  INTEREST_PAYOUT, SSP_CORPORATE_ACTION_DIVIDEND_EQUIVALENT,
+  TRADING_SAVINGSPLAN_EXECUTED, TRADING_TRADE_EXECUTED, CARD_TRANSACTION,
+  CARD_AFT, PAYMENT_INBOUND/OUTBOUND, SAVEBACK_AGGREGATE,
+  SSP_CORPORATE_ACTION_CASH. Informational events (SAVINGS_PLAN_INVOICE_CREATED
+  and similar) EXCLUDED — double-count guard. Reconciliation invariant:
+  cash at the first event date ≈ 0 (validated on live data; if violated, the
+  classification is wrong).
+
+### v0.3.0 classification finding (2026-08-15, live)
+
+- The REST transactions feed is the cash-movement feed BY CONSTRUCTION: all 335
+  fetched items carried signed `amount`s. The reconstruction counts ANY
+  amount-bearing event (no denylist).
+- Initial classification (a fixed event-type set) was WRONG: it missed
+  ORDER_EXECUTED (-82,726.82 over 27 events), TRADE_INVOICE (-3,006),
+  CARD_REFUND (+215), INTEREST_PAYOUT_CREATED (+11.74) -> reconstructed cash
+  at the start was -86,447.83 (the invariant test caught it before shipping).
+- SAVINGS_PLAN_INVOICE_CREATED vs TRADING_SAVINGSPLAN_EXECUTED: ZERO
+  (date, amount) overlap in Daniel's data -> invoices are NOT duplicates and
+  ARE counted. Excluding them broke the invariant by ~-4,942 EUR.
+- With the fix: cash residual (current - sum events) = +58.25 EUR on live data
+  (0.04% of ~165k inflows) — attributed to events before the feed start
+  (2024-05-29; account created 2023-10-07) and pending settlements. The curve
+  has NO negative cash days.
