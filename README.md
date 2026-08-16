@@ -50,9 +50,20 @@ window, default: full curve), `--snapshots <file>` (JSON `[{date, total}]` of
 collector snapshots that override chart points on matching dates).
 
 `--json` contract: `{ok, start_date, end_date, days, approximate, note,
-coverage, series: [{date, total, cash}]}`; the note states granularity ("daily
-since <date>, coarser before") and the cash reconstruction summary. Human
-output is a compact date/total/cash/Δ table.
+coverage, series: [{date, total, cash, deposits, invested, interest}]}`; the
+note states granularity ("daily since <date>, coarser before"), the cash
+reconstruction summary and the event counts behind each curve. Human output is
+a compact date/total/cash/Δ table.
+
+Curves (all cumulative, "strictly before date" semantics, emitted per point):
+- `deposits` — net external money flow only (deposits + withdrawals + card).
+- `invested` — net cash deployed into positions (standing plans, trades,
+  saveback; buys grow it, sells reduce it). Deposits/withdrawals are cash-
+  account moves, never invested.
+- `interest` — cumulative interest income (signed; loan interest would be
+  negative). Cash gains = interest only: reinvested dividend equivalents are
+  portfolio gains, not cash income (they leave cash via `invested`-like flows
+  and return inside the position value).
 
 ### Timeline
 
