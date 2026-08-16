@@ -28,6 +28,9 @@ def test_classify():
     assert timeline.classify("DOCUMENTS_ACCEPTED") == "documents"
     assert timeline.classify("SOME_UNKNOWN_EVENT") == "other"
     assert timeline.classify(None) == "other"
+    # every bucket classify() can return must exist in BUCKETS (summary loop)
+    assert timeline.classify("CARD_PAYMENT") == "card"
+    assert "card" in timeline.BUCKETS
 
 
 def test_timeline_merges_and_dedupes():

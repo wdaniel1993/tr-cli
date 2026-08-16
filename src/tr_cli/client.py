@@ -427,6 +427,7 @@ class HistoryPoint:
     cash: str | None
     deposits: str | None = None
     invested: str | None = None
+    interest: str | None = None  # cumulative interest income (signed)
 
 
 @dataclass
@@ -441,6 +442,7 @@ class HistoryResult:
     cash_events: int = 0
     deposits_events: int = 0  # money-flow events feeding the deposits curve
     invested_events: int = 0  # order events feeding the invested curve
+    interest_events: int = 0  # interest events feeding the interest curve
     cash_residual: Decimal | None = None  # current_cash - sum(all events)
 
 
@@ -616,6 +618,39 @@ def _invested_curve(
     return {d: inv_at(d) for d in target}, count
 
 
+def _interest_curve(
+    events: list[tuple[str, Decimal, str]],
+    series_dates: list[str] | None = None,
+) -> tuple[dict[str, Decimal], int]:
+    """Cumulative interest income per date (bucket 'interest', signed — loan
+    interest would be negative). Cash gains = interest only; reinvested
+    dividends belong to portfolio gains. Mirrors the cash-walk semantics:
+    interest(date) = cumulative interest strictly BEFORE date."""
+    from collections import defaultdict
+    import bisect
+
+    flow: dict[str, Decimal] = defaultdict(Decimal)
+    count = 0
+    for day, amt, bucket in events:
+        if bucket == "interest":
+            flow[day] += amt
+            count += 1
+    dates = sorted(flow)
+    prefix: list[Decimal] = []
+    acc = Decimal(0)
+    for d in dates:
+        prefix.append(acc)
+        acc += flow[d]
+    prefix.append(acc)
+
+    def int_at(day: str) -> Decimal:
+        idx = bisect.bisect_left(dates, day)
+        return prefix[idx]
+
+    target = series_dates if series_dates is not None else dates
+    return {d: int_at(d) for d in target}, count
+
+
 MONEY_FLOW_BUCKETS = ("deposits", "withdrawals", "card")
 
 
@@ -750,6 +785,7 @@ def history(
     )
     dep_map, n_dep_events = _deposit_curve(events, series_dates=dates)
     inv_map, n_inv_events = _invested_curve(events, series_dates=dates)
+    int_map, n_int_events = _interest_curve(events, series_dates=dates)
 
     # --- 3) series --------------------------------------------------------------
     series: list[HistoryPoint] = []
@@ -769,6 +805,9 @@ def history(
         inv_at_q = (inv_map.get(day) or Decimal(0)).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
+        int_at_q = (int_map.get(day) or Decimal(0)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
         series.append(
             HistoryPoint(
                 date=day,
@@ -776,6 +815,7 @@ def history(
                 cash=str(cash_at_q) if cash_str is not None else None,
                 deposits=str(dep_at_q) if cash_str is not None else None,
                 invested=str(inv_at_q) if cash_str is not None else None,
+                interest=str(int_at_q) if cash_str is not None else None,
             )
         )
 
@@ -795,6 +835,7 @@ def history(
     note += f"; cash reconstructed from {n_events} events"
     note += f"; deposits curve from {n_dep_events} money-flow events"
     note += f"; invested curve from {n_inv_events} order events"
+    note += f"; interest curve from {n_int_events} interest events"
     if residual != 0:
         note += f"; cash residual (current - sum events): {residual:.2f}"
     if snapshot_pairs:
@@ -816,5 +857,6 @@ def history(
         cash_events=n_events,
         deposits_events=n_dep_events,
         invested_events=n_inv_events,
+        interest_events=n_int_events,
         cash_residual=residual,
     )

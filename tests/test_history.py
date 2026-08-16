@@ -213,6 +213,23 @@ def test_history_invested_curve():
     assert h.invested_events == 3
 
 
+def test_history_interest_curve():
+    """Interest curve = cumulative interest income only (signed). External
+    flow, orders and dividends must NOT move it — cash gains = interest only;
+    reinvested dividends are portfolio gains, not cash income."""
+    m = _logged_in()
+    h = client.history(m)
+    assert all(p.interest is not None for p in h.series)
+    # before the first interest event the curve is 0
+    assert h.series[0].interest == "0.00"
+    # interest only: single +7.63 event
+    assert h.series[-1].interest == "7.63"
+    int_values = [Decimal(p.interest) for p in h.series]  # type: ignore[arg-type]
+    diffs = {int_values[i] - int_values[i - 1] for i in range(1, len(int_values))}
+    assert diffs <= {Decimal("0.00"), Decimal("7.63")}
+    assert h.interest_events == 1
+
+
 def test_history_cli_json_contract(cli_env):
     r = runner.invoke(app, ["login"], env={})
     assert r.exit_code == 0
@@ -239,6 +256,7 @@ def test_history_cli_json_contract(cli_env):
         "cash": data["series"][0]["cash"],
         "deposits": data["series"][0]["deposits"],
         "invested": data["series"][0]["invested"],
+        "interest": data["series"][0]["interest"],
     }
     assert all(
         "date" in p and "total" in p and "cash" in p and "deposits" in p

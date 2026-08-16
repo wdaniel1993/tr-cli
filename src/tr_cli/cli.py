@@ -434,6 +434,7 @@ def history(
                 "cash": p.cash,
                 "deposits": p.deposits,
                 "invested": p.invested,
+                "interest": p.interest,
             }
             for p in result.series
         ],

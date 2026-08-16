@@ -30,6 +30,7 @@ from .transport import Transport
 BUCKETS = (
     "deposits",
     "withdrawals",
+    "card",
     "interest",
     "dividends",
     "orders",
