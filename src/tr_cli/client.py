@@ -419,12 +419,14 @@ class HistoryPoint:
     """One day of the historical curve. `total` = positions (official chart
     netValue); `cash` = reconstructed cash at the start of that day (UTC);
     `deposits` = cumulative net external money flow (deposits + withdrawals +
-    card) at the start of that day (UTC)."""
+    card) at the start of that day (UTC); `invested` = cumulative net cash
+    invested into the portfolio (orders: standing plans, trades, saveback)."""
 
     date: str  # YYYY-MM-DD (UTC)
     total: Decimal
     cash: str | None
     deposits: str | None = None
+    invested: str | None = None
 
 
 @dataclass
@@ -438,6 +440,7 @@ class HistoryResult:
     snapshots_merged: int = 0
     cash_events: int = 0
     deposits_events: int = 0  # money-flow events feeding the deposits curve
+    invested_events: int = 0  # order events feeding the invested curve
     cash_residual: Decimal | None = None  # current_cash - sum(all events)
 
 
@@ -578,6 +581,41 @@ def _reconstruct_cash(
     return {d: cash_at(d) for d in target}, total_s, len(events)
 
 
+def _invested_curve(
+    events: list[tuple[str, Decimal, str]],
+    series_dates: list[str] | None = None,
+) -> tuple[dict[str, Decimal], int]:
+    """Cumulative net cash invested into the portfolio per date: standing
+    orders, one-off trades and saveback (bucket 'orders', buys are negative
+    amounts so the curve grows; sells reduce it). Excludes external money
+    flow (deposits/withdrawals/card) — those are cash-account movements, not
+    invested capital. Mirror of the cash walk semantics: invested(date) =
+    cumulative orders strictly BEFORE date."""
+    from collections import defaultdict
+    import bisect
+
+    flow: dict[str, Decimal] = defaultdict(Decimal)
+    count = 0
+    for day, amt, bucket in events:
+        if bucket == "orders":
+            flow[day] -= amt  # buys negative -> invested grows
+            count += 1
+    dates = sorted(flow)
+    prefix: list[Decimal] = []
+    acc = Decimal(0)
+    for d in dates:
+        prefix.append(acc)
+        acc += flow[d]
+    prefix.append(acc)
+
+    def inv_at(day: str) -> Decimal:
+        idx = bisect.bisect_left(dates, day)
+        return prefix[idx]
+
+    target = series_dates if series_dates is not None else dates
+    return {d: inv_at(d) for d in target}, count
+
+
 MONEY_FLOW_BUCKETS = ("deposits", "withdrawals", "card")
 
 
@@ -711,6 +749,7 @@ def history(
         events, current_cash, series_dates=dates
     )
     dep_map, n_dep_events = _deposit_curve(events, series_dates=dates)
+    inv_map, n_inv_events = _invested_curve(events, series_dates=dates)
 
     # --- 3) series --------------------------------------------------------------
     series: list[HistoryPoint] = []
@@ -727,12 +766,16 @@ def history(
         dep_at_q = (dep_map.get(day) or Decimal(0)).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
+        inv_at_q = (inv_map.get(day) or Decimal(0)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
         series.append(
             HistoryPoint(
                 date=day,
                 total=day_total,
                 cash=str(cash_at_q) if cash_str is not None else None,
                 deposits=str(dep_at_q) if cash_str is not None else None,
+                invested=str(inv_at_q) if cash_str is not None else None,
             )
         )
 
@@ -751,6 +794,7 @@ def history(
     note += f"; {granularity} (coarser before)"
     note += f"; cash reconstructed from {n_events} events"
     note += f"; deposits curve from {n_dep_events} money-flow events"
+    note += f"; invested curve from {n_inv_events} order events"
     if residual != 0:
         note += f"; cash residual (current - sum events): {residual:.2f}"
     if snapshot_pairs:
@@ -771,5 +815,6 @@ def history(
         snapshots_merged=len(snapshot_pairs),
         cash_events=n_events,
         deposits_events=n_dep_events,
+        invested_events=n_inv_events,
         cash_residual=residual,
     )

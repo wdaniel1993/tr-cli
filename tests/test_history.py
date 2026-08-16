@@ -196,6 +196,23 @@ def test_history_deposits_curve():
     }
 
 
+def test_history_invested_curve():
+    """Invested curve = cumulative ORDERS only (standing plans, trades,
+    saveback). External flow (deposits/withdrawals/card), dividends and
+    interest must NOT move it."""
+    m = _logged_in()
+    h = client.history(m)
+    assert all(p.invested is not None for p in h.series)
+    # before the first order the curve is 0
+    assert h.series[0].invested == "0.00"
+    # orders only: -150 (savings plan) -15 (saveback) -150 (savings plan) -> 315
+    assert h.series[-1].invested == "315.00"
+    inv_values = [Decimal(p.invested) for p in h.series]  # type: ignore[arg-type]
+    diffs = {inv_values[i] - inv_values[i - 1] for i in range(1, len(inv_values))}
+    assert diffs <= {Decimal("0.00"), Decimal("150.00"), Decimal("15.00")}
+    assert h.invested_events == 3
+
+
 def test_history_cli_json_contract(cli_env):
     r = runner.invoke(app, ["login"], env={})
     assert r.exit_code == 0
@@ -221,9 +238,11 @@ def test_history_cli_json_contract(cli_env):
         "total": data["series"][0]["total"],
         "cash": data["series"][0]["cash"],
         "deposits": data["series"][0]["deposits"],
+        "invested": data["series"][0]["invested"],
     }
     assert all(
         "date" in p and "total" in p and "cash" in p and "deposits" in p
+        and "invested" in p
         for p in data["series"]
     )
     # privacy: no account numbers anywhere in the output

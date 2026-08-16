@@ -1,6 +1,6 @@
 [project]
 name = "tr-cli"
-version = "0.4.0"
+version = "0.4.1"
 description = "Small unofficial Trade Republic CLI: login (v2 push), portfolio, rates, details"
 readme = "README.md"
 authors = [
