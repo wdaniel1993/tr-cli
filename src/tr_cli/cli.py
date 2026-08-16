@@ -428,7 +428,12 @@ def history(
             "snapshots_merged": result.snapshots_merged,
         },
         "series": [
-            {"date": p.date, "total": str(p.total), "cash": p.cash}
+            {
+                "date": p.date,
+                "total": str(p.total),
+                "cash": p.cash,
+                "deposits": p.deposits,
+            }
             for p in result.series
         ],
     }

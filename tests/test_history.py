@@ -144,7 +144,7 @@ def test_history_amount_presence_rule_and_invariant():
     assert h.cash_events == 9
     # dropping any cash-moving event breaks the invariant (e.g. the -900 OUTGOING)
     dropped = [events[0]] + events[2:]  # everything except the -900 event
-    residual = Decimal("2234.56") - sum(a for _, a in dropped)
+    residual = Decimal("2234.56") - sum(a for _, a, _b in dropped)
     assert residual == Decimal("-900.00")
 
 
@@ -171,6 +171,31 @@ def test_history_timeline_pagination():
     assert len(page_requests) >= 4
 
 
+def test_history_deposits_curve():
+    """Deposits curve = cumulative net EXTERNAL money flow only: deposits +
+    withdrawals + card. Orders, dividends and interest must not move it."""
+    m = _logged_in()
+    h = client.history(m)
+    # before the first money-flow event the curve is 0
+    assert h.series[0].deposits == "0.00"
+    # external flow only: 3150 - 900 + 600 - 123.67 (card) = 2726.33;
+    # orders (-150/-150), dividend (-184.4), interest (7.63), saveback (-15)
+    # are internal/income and must NOT move the curve
+    assert h.series[-1].deposits == "2726.33"
+    assert h.deposits_events == 4
+    # steps only at money-flow event dates (mock: 3150 / -900 / 600 / -123.67)
+    assert all(p.deposits is not None for p in h.series)
+    dep_values = [Decimal(p.deposits) for p in h.series]  # type: ignore[arg-type]
+    diffs = {dep_values[i] - dep_values[i - 1] for i in range(1, len(dep_values))}
+    assert diffs <= {
+        Decimal("0.00"),
+        Decimal("3150.00"),
+        Decimal("-900.00"),
+        Decimal("600.00"),
+        Decimal("-123.67"),
+    }
+
+
 def test_history_cli_json_contract(cli_env):
     r = runner.invoke(app, ["login"], env={})
     assert r.exit_code == 0
@@ -195,8 +220,12 @@ def test_history_cli_json_contract(cli_env):
         "date": data["start_date"],
         "total": data["series"][0]["total"],
         "cash": data["series"][0]["cash"],
+        "deposits": data["series"][0]["deposits"],
     }
-    assert all("date" in p and "total" in p and "cash" in p for p in data["series"])
+    assert all(
+        "date" in p and "total" in p and "cash" in p and "deposits" in p
+        for p in data["series"]
+    )
     # privacy: no account numbers anywhere in the output
     blob = json.dumps(data)
     assert "securitiesAccountNumber" not in blob

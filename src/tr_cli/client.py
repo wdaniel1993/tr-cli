@@ -417,11 +417,14 @@ def details(transport: Transport, isin: str, *, timeout: float = 6.0) -> dict[st
 @dataclass
 class HistoryPoint:
     """One day of the historical curve. `total` = positions (official chart
-    netValue); `cash` = reconstructed cash at the start of that day (UTC)."""
+    netValue); `cash` = reconstructed cash at the start of that day (UTC);
+    `deposits` = cumulative net external money flow (deposits + withdrawals +
+    card) at the start of that day (UTC)."""
 
     date: str  # YYYY-MM-DD (UTC)
     total: Decimal
     cash: str | None
+    deposits: str | None = None
 
 
 @dataclass
@@ -434,6 +437,7 @@ class HistoryResult:
     approximate: bool = False
     snapshots_merged: int = 0
     cash_events: int = 0
+    deposits_events: int = 0  # money-flow events feeding the deposits curve
     cash_residual: Decimal | None = None  # current_cash - sum(all events)
 
 
@@ -485,12 +489,15 @@ def _fetch_portfolio_chart(
 
 def _fetch_cash_events(
     transport: Transport, *, timeout: float = 8.0, max_pages: int = 50
-) -> list[tuple[str, Decimal]]:
+) -> list[tuple[str, Decimal, str]]:
     """REST timeline transactions (paginated via olderThan cursor); returns
-    [(date, signed amount)] for CASH-MOVING event types only."""
+    [(date, signed amount, bucket)] for CASH-MOVING event types only. The
+    bucket (timeline.classify of eventType) lets callers separate external
+    money flow (deposits/withdrawals/card) from internal events
+    (orders/dividends/interest)."""
     from . import timeline as timeline_mod
 
-    events: list[tuple[str, Decimal]] = []
+    events: list[tuple[str, Decimal, str]] = []
     cursor: str | None = None
     for _page in range(max_pages):
         params: dict[str, Any] = {"limit": 100}
@@ -523,7 +530,13 @@ def _fetch_cash_events(
             except (ValueError, TypeError):
                 continue
             try:
-                events.append((day, Decimal(str(amt["value"]))))
+                events.append(
+                    (
+                        day,
+                        Decimal(str(amt["value"])),
+                        timeline_mod.classify(it.get("eventType")),
+                    )
+                )
             except (ValueError, TypeError, ArithmeticError):
                 continue
         cursors = j.get("cursors") if isinstance(j, dict) else {}
@@ -534,7 +547,7 @@ def _fetch_cash_events(
 
 
 def _reconstruct_cash(
-    events: list[tuple[str, Decimal]],
+    events: list[tuple[str, Decimal, str]],
     current_cash: Decimal,
     series_dates: list[str] | None = None,
 ) -> tuple[dict[str, Decimal], int, Decimal]:
@@ -544,7 +557,7 @@ def _reconstruct_cash(
     from collections import defaultdict
 
     by_date: dict[str, Decimal] = defaultdict(Decimal)
-    for day, amt in events:
+    for day, amt, _bucket in events:
         by_date[day] += amt
     event_dates = sorted(by_date)
     prefix: list[Decimal] = []
@@ -563,6 +576,43 @@ def _reconstruct_cash(
 
     target = series_dates if series_dates is not None else event_dates
     return {d: cash_at(d) for d in target}, total_s, len(events)
+
+
+MONEY_FLOW_BUCKETS = ("deposits", "withdrawals", "card")
+
+
+def _deposit_curve(
+    events: list[tuple[str, Decimal, str]],
+    series_dates: list[str] | None = None,
+) -> tuple[dict[str, Decimal], int]:
+    """Cumulative net external money flow per date — deposits + withdrawals +
+    card spending ONLY. Orders/dividends/interest are internal or income and
+    belong to gains, not deposits. Mirrors the cash-walk semantics:
+    deposits(date) = cumulative flow strictly BEFORE date. Returns
+    ({date: cumulative deposits}, money_flow_event_count)."""
+    from collections import defaultdict
+    import bisect
+
+    flow: dict[str, Decimal] = defaultdict(Decimal)
+    count = 0
+    for day, amt, bucket in events:
+        if bucket in MONEY_FLOW_BUCKETS:
+            flow[day] += amt
+            count += 1
+    dates = sorted(flow)
+    prefix: list[Decimal] = []
+    acc = Decimal(0)
+    for d in dates:
+        prefix.append(acc)
+        acc += flow[d]
+    prefix.append(acc)  # sentinel for bisect_left == len(dates)
+
+    def dep_at(day: str) -> Decimal:
+        idx = bisect.bisect_left(dates, day)
+        return prefix[idx]
+
+    target = series_dates if series_dates is not None else dates
+    return {d: dep_at(d) for d in target}, count
 
 
 def _load_snapshots(snapshots: Any) -> list[tuple[str, Decimal]]:
@@ -660,6 +710,7 @@ def history(
     cash_map, total_s, n_events = _reconstruct_cash(
         events, current_cash, series_dates=dates
     )
+    dep_map, n_dep_events = _deposit_curve(events, series_dates=dates)
 
     # --- 3) series --------------------------------------------------------------
     series: list[HistoryPoint] = []
@@ -673,11 +724,15 @@ def history(
         cash_at_q = cash_at.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         if cash_at_q < 0:
             negative_days.append(day)
+        dep_at_q = (dep_map.get(day) or Decimal(0)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
         series.append(
             HistoryPoint(
                 date=day,
                 total=day_total,
                 cash=str(cash_at_q) if cash_str is not None else None,
+                deposits=str(dep_at_q) if cash_str is not None else None,
             )
         )
 
@@ -695,6 +750,7 @@ def history(
     granularity = f"daily since {y1_start}" if y1_start else "coarser only"
     note += f"; {granularity} (coarser before)"
     note += f"; cash reconstructed from {n_events} events"
+    note += f"; deposits curve from {n_dep_events} money-flow events"
     if residual != 0:
         note += f"; cash residual (current - sum events): {residual:.2f}"
     if snapshot_pairs:
@@ -714,5 +770,6 @@ def history(
         approximate=False,
         snapshots_merged=len(snapshot_pairs),
         cash_events=n_events,
+        deposits_events=n_dep_events,
         cash_residual=residual,
     )
