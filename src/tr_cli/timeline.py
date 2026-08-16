@@ -68,7 +68,7 @@ _CLASSIFY_RULES: list[tuple[tuple[str, ...], str]] = [
         "card",
     ),
     (
-        ("SAVINGSPLAN", "SAVINGS_PLAN", "ORDER", "TRADE_INVOICE", "ORDER_INVOICE", "SAVEBACK"),
+        ("TRADING_", "SAVINGSPLAN", "SAVINGS_PLAN", "ORDER", "TRADE_INVOICE", "ORDER_INVOICE", "SAVEBACK"),
         "orders",
     ),
     (

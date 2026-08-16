@@ -20,6 +20,8 @@ def test_classify():
     assert timeline.classify("INTEREST_PAYOUT") == "interest"
     assert timeline.classify("SSP_CORPORATE_ACTION_DIVIDEND_EQUIVALENT") == "dividends"
     assert timeline.classify("TRADING_SAVINGSPLAN_EXECUTED") == "orders"
+    assert timeline.classify("TRADING_TRADE_EXECUTED") == "orders"
+    assert timeline.classify("TRADING_SELL_EXECUTED") == "orders"
     assert timeline.classify("ORDER_REJECTED") == "orders"
     assert timeline.classify("SSP_CORPORATE_ACTION_INFORMATIVE") == "corporate_actions"
     assert timeline.classify("TAX_YEAR_END_REPORT_CREATED") == "documents"
