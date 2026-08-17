@@ -513,10 +513,24 @@ def session_refresh() -> None:
         from .auth import refresh_session
 
         before = transport.cookies_snapshot()
-        result = refresh_session(transport, _device_id(base_dir), _waf_token())
-        if not result["ok"]:
-            print(f"error: {result['error']}", file=sys.stderr)
-            raise typer.Exit(code=EXIT_GENERIC)
+        result = None
+        # Retry transient failures (5xx / network) up to 2 times with backoff;
+        # a definitive 401 (AUTHENTICATION_ERROR) is NOT retried — it means the
+        # refresh token is dead server-side and only `tr-cli login` can recover.
+        for attempt in range(3):
+            result = refresh_session(transport, _device_id(base_dir), _waf_token())
+            if result["ok"] or result["status_code"] == 401:
+                break
+            time.sleep(5 * (attempt + 1))
+        if not result or not result["ok"]:
+            status = (result or {}).get("status_code", 0)
+            if status == 401:
+                _fail(NeedsLogin(
+                    "Session expired or rejected (401). Run `tr-cli login` to re-authenticate."
+                ))
+            _fail(TrCliError(
+                f"session refresh failed (HTTP {status}): {(result or {}).get('error', 'unknown')}"
+            ))
         after = transport.cookies_snapshot()
         session_mod.save_cookies(after, base_dir)
         changed = sorted(
