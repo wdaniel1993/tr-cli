@@ -32,7 +32,6 @@ from . import client as client_mod
 from . import render as render_mod
 from . import session as session_mod
 from .errors import (
-    EXIT_GENERIC,
     NeedsLogin,
     TrCliError,
 )
@@ -160,11 +159,20 @@ def login(
     pin: str | None = typer.Option(
         None, "--pin", "-p", help="TR PIN (or TR_PIN env). Prompted if omitted."
     ),
+    otp_less: bool = typer.Option(
+        False,
+        "--otp-less",
+        help="PIN-only login (X-TR-OTP-Less header; skips the approval push "
+        "when the device is trusted). Env: TR_OTP_LESS=1.",
+    ),
 ) -> None:
     """Log in via the v2 push flow (approve the prompt in the TR mobile app)."""
     mock = _ctx_mock()
     base_dir = _ctx_base_dir()
     phone, pin = _resolve_phone_pin(phone, pin)
+    import os as _os
+
+    otp_less = otp_less or _os.environ.get("TR_OTP_LESS") == "1"
     transport = _login_transport(mock)
 
     from .auth import login_flow
@@ -181,8 +189,6 @@ def login(
     def on_pending(remaining: int) -> None:
         print(f"Still waiting for approval, {remaining}s left...", file=sys.stderr)
 
-    import os as _os
-
     timeout = float(_os.environ.get("TR_LOGIN_TIMEOUT", "120"))
     try:
         result = login_flow(
@@ -194,6 +200,7 @@ def login(
             on_initiate=on_initiate,
             on_pending=on_pending,
             timeout=timeout,
+            otp_less=otp_less,
         )
     except TrCliError as e:
         _fail(e)

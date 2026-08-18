@@ -28,6 +28,19 @@ def test_login_flow_harvests_cookies(mock_transport):
     assert "tr_session" in result.cookies
 
 
+def test_login_flow_otp_less_confirms_without_approval(mock_transport):
+    result = login_flow(mock_transport, PHONE, PIN, DEVICE_ID, otp_less=True)
+    assert mock_transport._otp_less is True  # X-TR-OTP-Less header was sent
+    assert "tr_refresh" in result.cookies
+    assert "tr_session" in result.cookies
+
+
+def test_login_flow_default_does_not_send_otp_less_header(mock_transport):
+    result = login_flow(mock_transport, PHONE, PIN, DEVICE_ID)
+    assert mock_transport._otp_less is False
+    assert "tr_refresh" in result.cookies
+
+
 def test_login_flow_rate_limited():
     m = MockTransport(mode="rate_limited")
     with pytest.raises(RateLimited) as exc:

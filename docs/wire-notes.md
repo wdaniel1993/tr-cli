@@ -348,3 +348,11 @@ App version served: `2.2632.29` (index.js + HTML meta). TR_APP_VERSION default b
   (0.04% of ~165k inflows) — attributed to events before the feed start
   (2024-05-29; account created 2023-10-07) and pending settlements. The curve
   has NO negative cash days.
+
+## X-TR-OTP-Less (verified via handelsrepublik, live-tested 2026-08-18)
+
+- POST /api/v2/auth/web/login with header `X-TR-OTP-Less: true` requests
+  PIN-only authentication on trusted devices (no app-approval push).
+- Implementation: `tr-cli login --otp-less` (or `TR_OTP_LESS=1`).
+- If the server ignores the header, the normal approval push is sent and the
+  flow waits for it — safe fallback.

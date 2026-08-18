@@ -593,8 +593,8 @@ def _invested_curve(
     flow (deposits/withdrawals/card) — those are cash-account movements, not
     invested capital. Mirror of the cash walk semantics: invested(date) =
     cumulative orders strictly BEFORE date."""
-    from collections import defaultdict
     import bisect
+    from collections import defaultdict
 
     flow: dict[str, Decimal] = defaultdict(Decimal)
     count = 0
@@ -626,8 +626,8 @@ def _interest_curve(
     interest would be negative). Cash gains = interest only; reinvested
     dividends belong to portfolio gains. Mirrors the cash-walk semantics:
     interest(date) = cumulative interest strictly BEFORE date."""
-    from collections import defaultdict
     import bisect
+    from collections import defaultdict
 
     flow: dict[str, Decimal] = defaultdict(Decimal)
     count = 0
@@ -663,8 +663,8 @@ def _deposit_curve(
     belong to gains, not deposits. Mirrors the cash-walk semantics:
     deposits(date) = cumulative flow strictly BEFORE date. Returns
     ({date: cumulative deposits}, money_flow_event_count)."""
-    from collections import defaultdict
     import bisect
+    from collections import defaultdict
 
     flow: dict[str, Decimal] = defaultdict(Decimal)
     count = 0

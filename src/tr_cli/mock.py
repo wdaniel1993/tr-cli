@@ -468,6 +468,7 @@ class MockTransport(Transport):
         self.missing_tickers: set[str] = set()
         self._cookies: dict[str, str] = dict(initial_cookies or {})
         self._poll_count = 0
+        self._otp_less = False
         self._session_rotations = 0
         self._requests: list[tuple[str, str]] = []  # (method, path) log for tests
         # history fixtures
@@ -498,6 +499,7 @@ class MockTransport(Transport):
         status = 200
 
         if path == "/api/v2/auth/web/login" and method.upper() == "POST":
+            self._otp_less = bool(headers and headers.get("X-TR-OTP-Less") == "true")
             if self.mode == "rate_limited":
                 return HttpResponse(status_code=429, body=LOGIN_429_BODY)
             if self.mode == "invalid_creds":
@@ -510,9 +512,7 @@ class MockTransport(Transport):
             self._poll_count += 1
             if self.mode == "pending_forever":
                 body = '{"status":"PENDING"}'
-            elif self._poll_count <= 1:
-                body = '{"status":"PENDING","expiresAt":"2030-01-01T00:00:00.000Z"}'
-            else:
+            elif self._otp_less or self._poll_count > 1:
                 body = '{"status":"CONFIRMED"}'
                 self._cookies.update(
                     {
@@ -522,6 +522,8 @@ class MockTransport(Transport):
                         "JSESSIONID": "mock-jsessionid",
                     }
                 )
+            else:
+                body = '{"status":"PENDING","expiresAt":"2030-01-01T00:00:00.000Z"}'
 
         elif path == "/api/v1/auth/web/session":
             self._session_rotations += 1

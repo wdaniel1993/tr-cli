@@ -89,13 +89,22 @@ def initiate_login(
     pin: str,
     device_id: str,
     waf_token: str | None = None,
+    otp_less: bool = False,
 ) -> LoginResult:
-    """POST /api/v2/auth/web/login. Returns processId (push sent to app)."""
+    """POST /api/v2/auth/web/login. Returns processId (push sent to app).
+
+    `otp_less=True` sends the X-TR-OTP-Less header: TR may authenticate
+    PIN-only without an app-approval push (trusted-device behaviour). If the
+    server still requires approval the poll simply waits as usual.
+    """
+    headers = login_headers(device_id, waf_token)
+    if otp_less:
+        headers["X-TR-OTP-Less"] = "true"
     resp = transport.request(
         "POST",
         LOGIN_ENDPOINT,
         json_body={"phoneNumber": phone, "pin": pin},
-        headers=login_headers(device_id, waf_token),
+        headers=headers,
     )
     if not resp.ok:
         _raise_for_login_error(resp, phase="initiate")
@@ -183,13 +192,18 @@ def login_flow(
     on_pending: Callable[[int], None] | None = None,
     timeout: float = LOGIN_TIMEOUT_SEC,
     interval: float = LOGIN_POLL_INTERVAL_SEC,
+    otp_less: bool = False,
 ) -> LoginResult:
     """Full v2 push login: initiate -> poll -> cookies.
 
     `on_initiate(process_id)` fires once after the push is sent;
     `on_pending(remaining_seconds)` fires periodically while waiting.
+    `otp_less=True` requests PIN-only auth (X-TR-OTP-Less header); the poll
+    still waits for CONFIRMED — without a push the server responds on its own.
     """
-    init = initiate_login(transport, phone, pin, device_id, waf_token)
+    init = initiate_login(
+        transport, phone, pin, device_id, waf_token, otp_less=otp_less
+    )
     if on_initiate:
         on_initiate(init.process_id)
     return poll_login(
